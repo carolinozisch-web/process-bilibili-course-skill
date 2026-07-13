@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.env
+.env.*
+.models/
+
+# Generated course materials and temporary media must never enter this repo.
+课程资料/
+后台处理文件/
+*.m4s
+*.mp3
+*.mp4
+*.wav
+*.webm
+*.part
+*.log
+
+# Secrets and browser exports.
+cookies*.txt
+cookies*.json
+*.pem
+*.key
