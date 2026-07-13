@@ -34,6 +34,8 @@ class SkillStructureTests(unittest.TestCase):
         path_parts = ("C:", "Users", "Caroline")
         prohibited = ("\\".join(path_parts), "/".join(path_parts))
         for path in ROOT.rglob("*"):
+            if ".git" in path.parts:
+                continue
             if not path.is_file() or path.suffix.lower() in {".pyc", ".png", ".jpg"}:
                 continue
             text = path.read_text(encoding="utf-8")
