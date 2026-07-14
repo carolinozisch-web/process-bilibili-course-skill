@@ -14,13 +14,21 @@ Required behavior:
 - Do not add facts, modern updates, criticism, or outside interpretation.
 - Correct obvious ASR errors only with high confidence. Otherwise use cautious wording or `[专有名词待核]`.
 - Use descriptive `##` headings. Avoid a generic template that forces unrelated content into fixed sections.
-- Keep the title linked to the raw transcript.
+- Keep the title linked to the timestamped transcript.
 
 Example heading:
 
 ```markdown
-# [第 31 集：从销售产品到销售解决方案（详细整理）](<../02-逐字稿/31-transcript.txt>)
+# [第 31 集：从销售产品到销售解决方案（详细整理）](<../../../后台处理文件/课程名/时间戳逐字稿/31-transcript-timestamped.md>)
 ```
+
+### Conditional navigation
+
+Read the manifest before adding navigation; count active unique episodes after skipped compilations are excluded.
+
+- If the count is greater than one, add “回到目录” navigation at both the top and bottom of every detailed note. Add “下一篇” only when a later active episode exists.
+- If the count is one, do not add “回到目录” or “下一篇” navigation. Remove generated navigation if the manifest changed from a series to a single retained video.
+- Run `scripts/course_utils.py index` to apply this rule deterministically and idempotently.
 
 ### Coverage QA
 

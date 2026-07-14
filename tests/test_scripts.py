@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -101,6 +102,56 @@ class CourseUtilsTests(unittest.TestCase):
             (root / "note.md").write_text("[missing](<missing.txt>)\n", encoding="utf-8")
             problems = course_utils.markdown_broken_links(root)
             self.assertEqual(len(problems), 1)
+
+    def prepare_course(self, root: Path, episode_count: int):
+        course = "示例课程"
+        course_root, work_root, manifest_path = course_utils.roots(root, course)
+        (course_root / "01-详细笔记").mkdir(parents=True)
+        (work_root / "时间戳逐字稿").mkdir(parents=True)
+        episodes = []
+        for number in range(1, episode_count + 1):
+            episode_id = f"{number:02d}"
+            episodes.append({"page": number, "title": f"第 {number} 课", "state": "notes_done"})
+            (course_root / "01-详细笔记" / f"{episode_id}-notes.md").write_text(
+                f"# [第 {number} 集：第 {number} 课（详细整理）](<../02-逐字稿/{episode_id}-transcript.txt>)\n\n正文。\n",
+                encoding="utf-8",
+            )
+            (work_root / "时间戳逐字稿" / f"{episode_id}-transcript-timestamped.md").write_text(
+                "[00:00] 示例\n", encoding="utf-8"
+            )
+        manifest_path.write_text(
+            __import__("json").dumps({"episodes": episodes}, ensure_ascii=False), encoding="utf-8"
+        )
+        return course, course_root
+
+    def test_index_adds_navigation_only_for_multi_episode_series(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            course, course_root = self.prepare_course(root, 2)
+            args = SimpleNamespace(workspace=str(root), course=course)
+            course_utils.command_index(args)
+            first = (course_root / "01-详细笔记" / "01-notes.md").read_text(encoding="utf-8")
+            last = (course_root / "01-详细笔记" / "02-notes.md").read_text(encoding="utf-8")
+            self.assertIn("01-transcript-timestamped.md", first.splitlines()[0])
+            self.assertEqual(first.count(course_utils.NAV_START), 2)
+            self.assertIn("[下一篇 →](<02-notes.md>)", first)
+            self.assertEqual(last.count(course_utils.NAV_START), 2)
+            self.assertNotIn("下一篇", last)
+            course_utils.command_index(args)
+            rerun = (course_root / "01-详细笔记" / "01-notes.md").read_text(encoding="utf-8")
+            self.assertEqual(rerun.count(course_utils.NAV_START), 2)
+
+    def test_index_omits_navigation_for_single_video(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            course, course_root = self.prepare_course(root, 1)
+            args = SimpleNamespace(workspace=str(root), course=course)
+            course_utils.command_index(args)
+            note = (course_root / "01-详细笔记" / "01-notes.md").read_text(encoding="utf-8")
+            self.assertIn("01-transcript-timestamped.md", note.splitlines()[0])
+            self.assertNotIn(course_utils.NAV_START, note)
+            self.assertNotIn("回到目录", note)
+            self.assertNotIn("下一篇", note)
 
 
 if __name__ == "__main__":

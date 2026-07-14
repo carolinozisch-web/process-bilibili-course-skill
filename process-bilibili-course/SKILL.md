@@ -73,7 +73,7 @@ For every episode:
 1. Read the complete transcript.
 2. Preserve every distinct argument, example, number, comparison, causal chain, and conclusion.
 3. Convert spoken repetition into smooth prose without deleting information.
-4. Link the title to `../02-逐字稿/NN-transcript.txt`.
+4. Link the title to the corresponding `后台处理文件/<course>/时间戳逐字稿/NN-transcript-timestamped.md` using a valid relative path.
 5. Write `课程资料/<course>/01-详细笔记/NN-notes.md`.
 6. Mark the episode `notes_done` with `scripts/course_utils.py mark`.
 
@@ -81,7 +81,9 @@ For abnormal short source content, write an explicit exception note instead of i
 
 ### 5. Create navigation and the concise collection
 
-Run `scripts/course_utils.py index` after notes exist. Then create `<course>-精炼笔记合集.md` in `00-课程入口` using the separate concise-note rules in `note-standard.md`.
+Run `scripts/course_utils.py index` after notes exist. It must inspect the manifest before adding navigation. When more than one active unique episode exists, it adds “回到目录” at the top and bottom of every detailed note and adds “下一篇” when a later active episode exists. When only one active video exists, it adds no directory or next-note navigation and removes any previously generated navigation. It always links detailed-note headings to timestamped transcripts.
+
+Then create `<course>-精炼笔记合集.md` in `00-课程入口` using the separate concise-note rules in `note-standard.md`.
 
 The detailed notes are cleaned full-content records. The concise collection is the only place where aggressive compression is allowed.
 

@@ -35,9 +35,11 @@ Use this structure for every course:
 
 ## Link rules
 
-- Note heading → `../02-逐字稿/NN-transcript.txt`
+- Note heading → relative path to `后台处理文件/<course>/时间戳逐字稿/NN-transcript-timestamped.md`
 - Detailed index → `../01-详细笔记/NN-notes.md`
 - Concise collection → `../02-逐字稿/NN-transcript.txt`
+- Detailed-note navigation → add directory links at the top and bottom, plus a next-note link when available, only when the manifest contains more than one active unique episode
+- Single-video note → omit directory and next-note navigation
 - Validate every relative link after moves or renames.
 
 ## Retention rules

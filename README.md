@@ -16,6 +16,7 @@ English documentation is available below.
 - 默认使用本地 `faster-whisper small`，无需 OpenAI API Key，也不消耗转写 API Token。
 - 支持中英文自动识别，并允许更换 Whisper 模型、设备和计算精度。
 - 每集详细笔记尽量保留原课的论点、例子、数字、因果过程和结论。
+- 详细笔记标题链接到带时间戳逐字稿；仅当清单确认是多集系列时，自动加入“回到目录”和“下一篇”导航，单视频不加。
 - 将“全集/合集/完整版”等疑似重复长视频标记为待确认，避免重复转写。
 - 每集保存进度，电脑唤醒或 Codex 重启后可从清单断点续作。
 - 自动检查缺失文件、异常短内容、残留缓存和 Markdown 失效链接。
@@ -133,6 +134,7 @@ This Codex Skill turns a public Bilibili video, multi-part course, or public Xia
 - Uses local `faster-whisper` by default; no OpenAI API key or transcription API tokens are required.
 - Keeps compressed MP3 and text artifacts while removing verified temporary media streams.
 - Preserves examples, numbers, reasoning, and conclusions in detailed notes instead of reducing lessons to short summaries.
+- Links detailed-note headings to timestamped transcripts and adds directory/next-note navigation only for confirmed multi-episode series.
 - Flags suspicious compilation episodes and abnormally short sources.
 - Checkpoints after every episode and resumes interrupted runs.
 - Validates expected files, manifest states, temporary media cleanup, and Markdown links.
