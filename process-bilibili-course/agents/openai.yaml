@@ -1,4 +1,4 @@
 interface:
-  display_name: "B站课程全流程笔记"
-  short_description: "自动下载、转写、整理并校验完整的 B 站系列课程资料与笔记"
-  default_prompt: "Use $process-bilibili-course to download this Bilibili course, transcribe every unique episode, and create detailed notes plus course indexes."
+  display_name: "B站与小红书视频笔记"
+  short_description: "下载并转写公开的 B 站或小红书视频，生成详细笔记、目录与精炼合集"
+  default_prompt: "Use $process-bilibili-course to download and transcribe this public Bilibili or Xiaohongshu video, then create faithful detailed notes and linked indexes."

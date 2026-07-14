@@ -121,9 +121,13 @@ def command_validate(args) -> None:
         if state == "abnormal_short": counts["exceptions"] += 1
         if state not in {"notes_done", "validated", "abnormal_short"}:
             problems.append(f"EP{episode_id} nonterminal state={state}")
-    temporary = list((work_root / "原始缓存").rglob("*.m4s")) if (work_root / "原始缓存").exists() else []
+    cache_root = work_root / "原始缓存"
+    temporary = (
+        [path for path in cache_root.rglob("*") if path.is_file() and path.suffix.lower() in {".m4s", ".mp4", ".webm"}]
+        if cache_root.exists() else []
+    )
     if temporary:
-        problems.append(f"temporary m4s files remain: {len(temporary)}")
+        problems.append(f"temporary media files remain: {len(temporary)}")
     broken = markdown_broken_links(course_root)
     problems.extend(f"broken link: {item}" for item in broken)
     result = {"course": args.course, "counts": counts, "broken_links": len(broken), "problems": problems}

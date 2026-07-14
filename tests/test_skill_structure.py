@@ -18,6 +18,7 @@ class SkillStructureTests(unittest.TestCase):
             "references/note-standard.md",
             "references/output-layout.md",
             "scripts/bilibili_pipeline.py",
+            "scripts/video_pipeline.py",
             "scripts/course_utils.py",
         ):
             self.assertTrue((SKILL / relative).is_file(), relative)

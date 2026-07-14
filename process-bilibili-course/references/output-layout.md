@@ -28,8 +28,8 @@ Use this structure for every course:
 ## Naming rules
 
 - Use two-digit episode IDs through 99: `01`, `02`, … `78`.
-- Derive order from Bilibili `page`, not download order or folder order.
-- Keep the Bilibili part title in metadata and the note heading.
+- For Bilibili, derive order from `page`, not download order or folder order. Number a single Xiaohongshu video as `01`.
+- Keep the source part or note title in metadata and the note heading.
 - Sanitize only Windows-invalid filename characters: `< > : " / \\ | ? *`.
 - Never mix two courses in one course directory.
 
@@ -52,7 +52,7 @@ Keep:
 Delete only after successful MP3 conversion and verification:
 
 - downloaded `.m4s` audio streams;
-- downloaded full video streams;
+- downloaded `.mp4` or other full video streams;
 - temporary split chunks.
 
 Do not delete source media on a failed conversion.

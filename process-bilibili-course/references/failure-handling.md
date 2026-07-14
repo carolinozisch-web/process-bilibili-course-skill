@@ -2,17 +2,18 @@
 
 ## Access and download
 
-- Try the public Bilibili metadata and playurl APIs first.
-- Resolve `b23.tv` to its final Bilibili video URL before metadata inspection. The bundled pipeline does this automatically.
-- If content requires login, region access, membership, or anti-bot cookies, stop and ask permission to use cookies from an installed Edge or Chrome profile.
-- Never assume Firefox is installed.
-- Do not paste, print, or store raw cookie values in notes or logs.
+- For Bilibili, try the public metadata and playurl APIs first. Resolve `b23.tv` before metadata inspection; the bundled pipeline does this automatically.
+- For Xiaohongshu, resolve `xhslink.com`, validate that the final host is `xiaohongshu.com`, and accept only a public video CDN URL exposed by the page. Store the canonical item URL without share-token query parameters.
+- Treat a missing public Xiaohongshu video URL as an image-only, deleted, expired, login-gated, or anti-bot case. Stop instead of guessing or scraping private endpoints.
+- Do not extract browser Cookies or bypass login, membership, payment, region, or DRM controls. Ask the user for a public link or a local media file they are authorized to process.
+- Do not paste, print, or store signed CDN URLs, share tokens, Cookies, or other credentials in notes or manifests.
 
 ## Numbering and missing parts
 
-- Build the manifest from `page`, `cid`, part title, and declared duration.
+- For Bilibili, build the manifest from `page`, `cid`, part title, and declared duration.
 - Do not equate cache position with course lesson number.
 - If a part is absent from the API response, report it before processing later parts.
+- Treat each Xiaohongshu note as one episode unless the user supplies several distinct links. Never infer a hidden series from recommendations on the page.
 
 ## Abnormally short content
 

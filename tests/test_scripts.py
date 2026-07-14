@@ -21,8 +21,8 @@ def load_module(name: str, relative_path: str):
 
 
 pipeline = load_module(
-    "bilibili_pipeline",
-    "process-bilibili-course/scripts/bilibili_pipeline.py",
+    "video_pipeline",
+    "process-bilibili-course/scripts/video_pipeline.py",
 )
 course_utils = load_module(
     "course_utils",
@@ -36,6 +36,38 @@ class PipelineTests(unittest.TestCase):
             pipeline.extract_bvid("https://www.bilibili.com/video/BV19x411X7C6?p=2"),
             "BV19x411X7C6",
         )
+
+    def test_share_text_extracts_xiaohongshu_url(self):
+        text = "标题 https://xhslink.com/o/example123 复制后打开小红书"
+        self.assertEqual(
+            pipeline.extract_input_url(text),
+            "https://xhslink.com/o/example123",
+        )
+
+    def test_detect_platform(self):
+        self.assertEqual(pipeline.detect_platform("https://b23.tv/example"), "bilibili")
+        self.assertEqual(pipeline.detect_platform("https://xhslink.com/o/example"), "xiaohongshu")
+
+    def test_parse_xiaohongshu_durations(self):
+        self.assertEqual(pipeline.parse_duration("05:01"), 301)
+        self.assertEqual(pipeline.parse_duration(301100), 301.1)
+        self.assertEqual(pipeline.parse_duration("PT5M1S"), 301)
+
+    def test_xiaohongshu_share_tokens_are_not_persisted(self):
+        input_url = "https://www.xiaohongshu.com/discovery/item/abc?xsec_token=secret"
+        canonical = "https://www.xiaohongshu.com/discovery/item/abc"
+        self.assertEqual(
+            pipeline.manifest_source_url(input_url, "xiaohongshu", canonical),
+            canonical,
+        )
+        self.assertEqual(
+            pipeline.manifest_source_url("https://xhslink.com/o/example", "xiaohongshu", canonical),
+            canonical,
+        )
+
+    def test_xiaohongshu_json_ld_is_parsed(self):
+        source = '<script type="application/ld+json">{"@type":"VideoObject","name":"示例","duration":"00:42"}</script>'
+        self.assertEqual(list(pipeline.iter_json_ld(source))[0]["name"], "示例")
 
     def test_safe_name_removes_windows_invalid_characters(self):
         self.assertEqual(pipeline.safe_name('Course: A/B?*'), "Course- A-B")

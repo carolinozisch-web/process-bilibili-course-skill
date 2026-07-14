@@ -1,15 +1,15 @@
 ---
 name: process-bilibili-course
-description: Download and process public Bilibili videos or multi-part courses into compressed audio, local faster-whisper transcripts, faithful detailed per-episode notes, a linked course index, and a separate concise collection. Use when the user provides a bilibili.com or b23.tv link and asks to download, transcribe, summarize, take notes, process every episode, resume an interrupted course, or organize the resulting course materials.
+description: Download and process public Bilibili or Xiaohongshu videos into compressed audio, local faster-whisper transcripts, faithful detailed notes, linked indexes, and a separate concise collection. Use when the user provides bilibili.com, b23.tv, xiaohongshu.com, or xhslink.com links or share text and asks to download, transcribe, summarize, take notes, process every episode, resume interrupted work, or organize the resulting course materials.
 ---
 
-# Process Bilibili Course
+# Process Public Video Courses
 
-Turn a Bilibili link into an idempotent, resumable course archive. Default to compressed audio and text only; delete temporary media streams after verified conversion.
+Turn a public Bilibili course or public Xiaohongshu video into an idempotent, resumable archive. Default to compressed audio and text only; delete temporary media after verified conversion.
 
 ## Required defaults
 
-- Process every unique part unless the user explicitly selects a range.
+- Process every unique Bilibili part unless the user explicitly selects a range. Treat a Xiaohongshu note as one episode.
 - Use local `faster-whisper small` to avoid transcription API cost.
 - Auto-detect Chinese versus English unless the language is obvious from metadata.
 - Create faithful, detailed notes for each episode and a separate concise course collection.
@@ -41,7 +41,9 @@ Install Python dependencies when missing with `python -m pip install httpx faste
 
 ### 2. Inspect before downloading
 
-Run `python scripts/bilibili_pipeline.py inspect --url <URL> --workspace <workspace>` on the URL. The script resolves `b23.tv` links automatically. Build a manifest from Bilibili `page`, `cid`, title, and duration. Do not infer episode order from cache folder names.
+Run `python scripts/video_pipeline.py inspect --url <URL-OR-SHARE-TEXT> --workspace <workspace>`. The script accepts bare links or common share text and resolves `b23.tv` and `xhslink.com` automatically.
+
+For Bilibili, build the manifest from `page`, `cid`, title, and duration. Do not infer episode order from cache folder names. For Xiaohongshu, accept only a public video note with an exposed CDN video stream; record its item ID, canonical URL, title, and duration as one episode.
 
 Review the inspection output for:
 
@@ -50,16 +52,17 @@ Review the inspection output for:
 - unexpectedly short parts;
 - ambiguous course titles;
 - a URL pointing to one selected `p=` while the containing series has many parts.
+- a Xiaohongshu page that is image-only, login-gated, deleted, expired, or missing a public video stream.
 
-Default to the entire series. Ask only when access requires user cookies, the desired course name is materially ambiguous, or a suspected duplicate cannot be decided safely.
+Default to the entire Bilibili series. Stop when access requires authentication, membership, payment, region bypass, DRM circumvention, or browser Cookie extraction. Ask only when the desired course name is materially ambiguous or a suspected duplicate cannot be decided safely.
 
 ### 3. Download and transcribe
 
-Run `python scripts/bilibili_pipeline.py run --url <URL> --workspace <workspace>`. Prefer Bilibili's public metadata/playurl API. Download the smallest suitable audio stream, convert it to mono 16 kHz 48 kbps MP3, verify the MP3, then delete the temporary `.m4s` file.
+Run `python scripts/video_pipeline.py run --url <URL-OR-SHARE-TEXT> --workspace <workspace>`. For Bilibili, prefer the public metadata and playurl APIs and choose the smallest suitable audio stream. For Xiaohongshu, use the public page's JSON-LD or embedded `masterUrl` video stream. Convert the source to mono 16 kHz 48 kbps MP3, decode-check the MP3, then delete the temporary `.m4s` or `.mp4` file.
 
 The script writes the transcript, timestamped transcript, segments, metadata, compressed audio, and `course-manifest.json`. It checkpoints after each episode and skips valid existing output.
 
-If public access fails, follow the cookie fallback in `failure-handling.md`; never extract browser cookies without permission.
+If public access fails, follow `failure-handling.md`. The bundled workflow must not extract browser Cookies or bypass access controls.
 
 ### 4. Write detailed notes in internal batches
 
@@ -89,7 +92,7 @@ Run `scripts/course_utils.py validate`. Do not declare completion until:
 - every unique expected part has audio, transcript, and note, or an explicit exception;
 - suspected compilation parts are recorded as skipped or intentionally included;
 - all Markdown links resolve;
-- no temporary media stream remains after successful conversion;
+- no temporary media remains after successful conversion;
 - the manifest contains a terminal state for every selected part;
 - detailed notes do not become systematically shorter or omit examples in later episodes.
 
