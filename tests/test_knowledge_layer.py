@@ -97,6 +97,23 @@ class KnowledgeLayerTests(unittest.TestCase):
         unit = next(row for row in results if row["kind"] == "knowledge_unit")
         self.assertIn("t=65", unit["sources"][0]["source_url_at"])
 
+    def test_search_splits_long_chinese_question_terms(self):
+        source_id = upsert_source(self.db, {
+            "platform": "bilibili", "canonical_url": "https://www.bilibili.com/video/BVdiagnostic1",
+            "title": "回归诊断", "status": "approved",
+        })
+        unit_id = add_unit(self.db, {
+            "title": "用残差图和 QQ 图诊断线性回归",
+            "when_to_use": "检查线性、等方差和正态性假设",
+            "steps": ["检查残差图", "检查 QQ 图"],
+            "keywords": ["模型诊断", "线性回归"], "status": "approved",
+        })
+        link_unit_source(self.db, unit_id, source_id, segment_start=30)
+        results = search(self.db, "怎样判断线性回归模型是否可靠", 5)
+        self.assertEqual(results[0]["title"], "用残差图和 QQ 图诊断线性回归")
+        keys = [(row["kind"], row["id"]) for row in results]
+        self.assertEqual(len(keys), len(set(keys)))
+
     def test_manual_curation_can_create_zero_or_more_units(self):
         transcript = self.root / "transcript.txt"
         transcript.write_text("先定义问题，再拆分步骤，最后检查结果。", encoding="utf-8")

@@ -475,9 +475,12 @@ def basic_query_terms(query: str) -> list[str]:
         " ",
         query,
     )
-    terms = [query.strip()]
-    terms.extend(re.findall(r"[A-Za-z][A-Za-z0-9_.+#-]{1,}|[\u4e00-\u9fff]{2,12}", stripped))
-    return list(dict.fromkeys(term for term in terms if len(term) >= 2))
+    segments = re.findall(r"[A-Za-z][A-Za-z0-9_.+#-]{1,}|[\u4e00-\u9fff]{2,12}", stripped)
+    terms = [query.strip(), *segments]
+    for segment in segments:
+        if re.fullmatch(r"[\u4e00-\u9fff]{4,}", segment):
+            terms.extend(segment[index:index + 2] for index in range(len(segment) - 1))
+    return list(dict.fromkeys(term for term in terms if len(term) >= 2))[:32]
 
 
 def search(db: sqlite3.Connection, query: str, limit: int = 20) -> list[dict]:
@@ -532,6 +535,7 @@ def search(db: sqlite3.Connection, query: str, limit: int = 20) -> list[dict]:
     for kind, item_id in fallback:
         if (kind, item_id) in seen:
             continue
+        seen.add((kind, item_id))
         value = get_unit(db, item_id) if kind == "knowledge_unit" else source_detail(db, item_id)
         results.append({"kind": kind, "score": None, **value})
     ranking_terms = [term.lower() for term in (terms[1:] or terms)]

@@ -31,3 +31,15 @@ The run produced three reviewed sources, five source-linked method cards, and pa
 5. How to model a binary outcome with logistic regression
 
 Every top result linked to an original public source and a timestamp. This validates the review, curation, retrieval, and traceability loop; the three fresh links above remain the pending network-dependent acceptance step.
+
+## Expanded knowledge-base validation
+
+The local knowledge base was then expanded with all 12 episodes of the regression-analysis course. The set covers data preparation, simple and multiple regression, diagnostics, nonlinear terms, multicollinearity, influential observations, subset selection, regularization, dimensionality reduction, and logistic regression.
+
+- 12 real video sources reviewed and curated
+- 21 source-linked method cards
+- 10 natural-language retrieval questions
+- 10/10 checks returned the expected card within the top five results
+- Every evaluated card retained its original video URL and segment timestamp
+
+The first run passed 6/10 questions. The failures exposed weak Chinese token splitting in SQLite's default full-text behavior. The basic retriever was updated to add bounded adjacent Chinese terms and deduplicate multi-hit results; the same questions then passed 10/10. This remains an explainable full-text heuristic, not semantic or embedding retrieval.
