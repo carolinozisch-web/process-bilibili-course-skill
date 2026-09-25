@@ -12,7 +12,7 @@ import httpx
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "process-bilibili-course" / "scripts"))
 
-from web_app import make_server  # noqa: E402
+from web_app import answer_from_cards, make_server  # noqa: E402
 
 
 class WebAppTests(unittest.TestCase):
@@ -52,6 +52,15 @@ class WebAppTests(unittest.TestCase):
             })
             self.assertNotIn(b"never-write-this-key", (Path(self.temp.name) / "知识库" / "knowledge.db").read_bytes())
             self.assertEqual(client.get("/").status_code, 200)
+
+    def test_basic_search_answer_uses_curated_card_content(self):
+        answer = answer_from_cards([{
+            "kind": "knowledge_unit", "title": "检查回归模型",
+            "when_to_use": "模型建立后", "steps": ["检查残差图", "检查 QQ 图"],
+            "constraints": ["结合数据背景判断"],
+        }])
+        self.assertIn("1. 检查残差图", answer)
+        self.assertIn("注意：", answer)
 
 
 if __name__ == "__main__":

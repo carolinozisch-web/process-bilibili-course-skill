@@ -252,13 +252,22 @@ async function runSearch(event) {
   try {
     const data = await api(`/api/search?q=${encodeURIComponent(query)}`);
     state.searchEventId = data.event_id;
-    $("#searchAnswer").textContent = data.answer + (data.ai_error ? `\n\nAI 增强暂不可用，已退回全文检索。` : "");
-    $("#searchResults").innerHTML = data.results.length ? data.results.map((result) => {
-      const description = result.kind === "knowledge_unit" ? result.when_to_use : result.summary_50;
-      const link = result.kind === "source" ? `<a href="${escapeHtml(result.canonical_url)}" target="_blank" rel="noreferrer">打开原视频</a>` :
-        (result.sources || []).slice(0, 2).map((source) => `<a href="${escapeHtml(source.source_url_at || source.canonical_url)}" target="_blank" rel="noreferrer">${escapeHtml(source.title || "查看来源")}</a>`).join(" · ");
-      return `<article class="search-result"><h3>${escapeHtml(result.title || "未命名来源")}</h3><p>${escapeHtml(description || "命中原始逐字稿")}</p>${link}</article>`;
-    }).join("") + `<div class="feedback"><span>这些结果有帮助吗？</span><button class="button small secondary search-feedback" data-value="helpful">有帮助</button><button class="button small secondary search-feedback" data-value="not_helpful">没有</button></div>` : '<div class="empty large">没有找到直接答案，可以换一个更具体的关键词。</div>';
+    const answerLabel = data.mode === "ai" ? "AI 综合回答" : "知识库直接答案";
+    const fallback = data.ai_error ? `\n\nAI 增强暂不可用，已退回本地知识库。` : "";
+    $("#searchAnswer").innerHTML = `<span class="badge success">${answerLabel}</span><div class="answer-copy">${escapeHtml(data.answer + fallback)}</div>`;
+    const cards = data.results.filter((result) => result.kind === "knowledge_unit");
+    const sources = data.results.filter((result) => result.kind === "source");
+    const cardHtml = cards.map((result, index) => {
+      const steps = (result.steps || []).length ? `<ol>${result.steps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol>` : "";
+      const constraints = (result.constraints || []).length ? `<p><strong>注意：</strong>${escapeHtml(result.constraints.join("；"))}</p>` : "";
+      const links = (result.sources || []).map((source) => {
+        const time = source.segment_start != null ? ` · ${Math.floor(source.segment_start / 60)}:${String(Math.floor(source.segment_start % 60)).padStart(2, "0")}` : "";
+        return `<a href="${escapeHtml(source.source_url_at || source.canonical_url)}" target="_blank" rel="noreferrer">${escapeHtml(source.title || "原始来源")}${time}</a>`;
+      }).join("");
+      return `<article class="search-result method-result"><div class="result-meta"><span class="badge success">方法卡 ${index + 1}</span></div><h3>${escapeHtml(result.title || "未命名方法")}</h3><p>${escapeHtml(result.when_to_use || "")}</p>${steps}${constraints}${links ? `<details class="evidence-details"><summary>核对来源和时间点</summary><div class="source-links">${links}</div></details>` : ""}</article>`;
+    }).join("");
+    const sourceHtml = sources.length ? `<details class="raw-results"><summary>查看原始视频匹配（${sources.length}）</summary><div>${sources.map((result) => `<article class="search-result source-result"><div class="result-meta"><span class="badge">原始来源</span></div><h3>${escapeHtml(result.title || "未命名来源")}</h3><p>${escapeHtml(result.summary_50 || "命中原始逐字稿")}</p><a href="${escapeHtml(result.source_url_at || result.canonical_url)}" target="_blank" rel="noreferrer">打开对应分集</a></article>`).join("")}</div></details>` : "";
+    $("#searchResults").innerHTML = cards.length ? `<h2 class="search-heading">提炼好的知识点</h2>${cardHtml}${sourceHtml}<div class="feedback"><span>这个答案有帮助吗？</span><button class="button small secondary search-feedback" data-value="helpful">有帮助</button><button class="button small secondary search-feedback" data-value="not_helpful">没有</button></div>` : `<div class="empty large">知识库中没有直接答案，可以换一个更具体的问题。</div>${sourceHtml}`;
     $$(".search-feedback").forEach((button) => button.addEventListener("click", async () => {
       await api("/api/search-feedback", { method: "POST", body: JSON.stringify({ event_id: state.searchEventId, feedback: button.dataset.value }) });
       notice("已记录反馈");

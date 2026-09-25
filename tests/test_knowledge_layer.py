@@ -97,6 +97,17 @@ class KnowledgeLayerTests(unittest.TestCase):
         unit = next(row for row in results if row["kind"] == "knowledge_unit")
         self.assertIn("t=65", unit["sources"][0]["source_url_at"])
 
+    def test_bilibili_part_and_timestamp_are_query_parameters(self):
+        source_id = upsert_source(self.db, {
+            "platform": "bilibili",
+            "canonical_url": "https://www.bilibili.com/video/BV1234567890/#p=7",
+            "status": "approved",
+        })
+        unit_id = add_unit(self.db, {"title": "VIF 检查", "status": "approved"})
+        link_unit_source(self.db, unit_id, source_id, segment_start=305)
+        linked = search(self.db, "VIF", 5)[0]["sources"][0]["source_url_at"]
+        self.assertEqual(linked, "https://www.bilibili.com/video/BV1234567890/?p=7&t=305")
+
     def test_search_splits_long_chinese_question_terms(self):
         source_id = upsert_source(self.db, {
             "platform": "bilibili", "canonical_url": "https://www.bilibili.com/video/BVdiagnostic1",

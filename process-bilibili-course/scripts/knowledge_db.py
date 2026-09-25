@@ -10,6 +10,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 SCHEMA_VERSION = 2
@@ -277,6 +278,9 @@ def source_detail(db: sqlite3.Connection, source_id: int) -> dict | None:
     """, (source_id,)).fetchone())
     if not source:
         return None
+    source["source_url_at"] = _source_url_at(
+        source.get("canonical_url", ""), source.get("usable_content_start")
+    )
     source["units"] = [_decoded(row) for row in db.execute("""
         SELECT u.*, us.segment_start, us.segment_end, us.contribution_type
         FROM unit_sources us JOIN knowledge_units u ON u.id=us.knowledge_unit_id
@@ -424,13 +428,40 @@ def link_unit_source(db: sqlite3.Connection, unit_id: int, source_id: int, **fie
     db.commit()
 
 
+def _seconds(value: object) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return max(0, int(float(value)))
+    except (TypeError, ValueError):
+        parts = str(value).split(":")
+        try:
+            total = 0.0
+            for part in parts:
+                total = total * 60 + float(part)
+            return max(0, int(total))
+        except ValueError:
+            return None
+
+
+def _source_url_at(url: str, start: object = None) -> str:
+    if "bilibili.com" not in url:
+        return url
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    page = re.search(r"(?:^|[?&])p=(\d+)", parts.fragment)
+    if page and "p" not in query:
+        query["p"] = page.group(1)
+    seconds = _seconds(start)
+    if seconds is not None:
+        query["t"] = str(seconds)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ""))
+
+
 def _source_link(row: dict) -> dict:
-    start = row.get("segment_start")
-    url = row.get("canonical_url", "")
-    if start is not None and "bilibili.com" in url:
-        joiner = "&" if "?" in url else "?"
-        url = f"{url}{joiner}t={int(start)}"
-    return {**row, "source_url_at": url}
+    return {**row, "source_url_at": _source_url_at(
+        row.get("canonical_url", ""), row.get("segment_start")
+    )}
 
 
 def get_unit(db: sqlite3.Connection, unit_id: int) -> dict | None:
@@ -471,7 +502,7 @@ def basic_query_terms(query: str) -> list[str]:
     """Remove common question framing so literal search still works without an LLM."""
     stripped = re.sub(
         r"怎样|怎么|如何|为什么|什么是|什么|是否|可以|应该|请问|帮我|告诉我|"
-        r"有哪些|有没有|一种|一个|这个|那个|进行|使用|判断|解释|方法|变量|做|可靠|吗|呢|的",
+        r"有哪些|有没有|一种|一个|这个|那个|进行|使用|方法|做|吗|呢|的",
         " ",
         query,
     )
@@ -522,8 +553,9 @@ def search(db: sqlite3.Connection, query: str, limit: int = 20) -> list[dict]:
         fallback.extend(
             ("knowledge_unit", row[0]) for row in db.execute("""
                 SELECT id FROM knowledge_units WHERE status IN ('approved','curated') AND
-                (title LIKE ? OR when_to_use LIKE ? OR steps LIKE ? OR keywords LIKE ?) LIMIT ?
-            """, (like, like, like, like, limit))
+                (title LIKE ? OR when_to_use LIKE ? OR steps LIKE ? OR constraints LIKE ? OR
+                 common_questions LIKE ? OR common_symptoms LIKE ? OR keywords LIKE ? OR topic_tags LIKE ?) LIMIT ?
+            """, (like, like, like, like, like, like, like, like, limit))
         )
         fallback.extend(
             ("source", row[0]) for row in db.execute("""
@@ -543,7 +575,9 @@ def search(db: sqlite3.Connection, query: str, limit: int = 20) -> list[dict]:
     def literal_rank(item: dict) -> tuple[int, int, float]:
         title = str(item.get("title", "")).lower()
         body = " ".join(str(item.get(key, "")) for key in ("when_to_use", "summary_50"))
-        body += " " + " ".join(item.get("steps", []))
+        for key in ("steps", "constraints", "common_questions", "common_symptoms", "keywords", "topic_tags"):
+            values = item.get(key) or []
+            body += " " + (" ".join(values) if isinstance(values, list) else str(values))
         title_hits = sum(term in title for term in ranking_terms)
         body_hits = sum(term in body.lower() for term in ranking_terms)
         kind_boost = 1 if item.get("kind") == "knowledge_unit" else 0

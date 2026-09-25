@@ -112,10 +112,18 @@ a:hover { text-decoration: underline; }
 .search-bar { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; max-width: 840px; }
 .search-bar input { min-height: 44px; font-size: 15px; }
 .answer-panel { max-width: 840px; margin: 18px 0; padding: 16px 18px; border-left: 3px solid var(--green); background: var(--surface); line-height: 1.7; white-space: pre-wrap; }
+.answer-copy { margin-top: 10px; color: var(--text); }
 .search-results { max-width: 980px; display: grid; gap: 10px; }
+.search-heading { margin: 8px 0 0; font-size: 16px; }
 .search-result { padding: 15px 0; border-bottom: 1px solid var(--line); }
 .search-result h3 { margin-bottom: 6px; font-size: 15px; }
 .search-result p { color: var(--muted); line-height: 1.6; }
+.search-result ol { margin: 8px 0; padding-left: 21px; line-height: 1.7; }
+.result-meta { margin-bottom: 7px; }
+.evidence-details, .raw-results { margin-top: 10px; }
+.evidence-details summary, .raw-results > summary { color: var(--blue); cursor: pointer; }
+.raw-results { padding: 13px 0; border-top: 1px solid var(--line); }
+.source-result { margin-left: 14px; }
 .feedback { display: flex; gap: 7px; margin-top: 10px; }
 .settings-layout { display: grid; grid-template-columns: minmax(0, 620px) minmax(240px, 360px); gap: 32px; }
 .settings-form { display: grid; gap: 9px; }

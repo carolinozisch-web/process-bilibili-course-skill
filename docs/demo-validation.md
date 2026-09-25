@@ -43,3 +43,7 @@ The local knowledge base was then expanded with all 12 episodes of the regressio
 - Every evaluated card retained its original video URL and segment timestamp
 
 The first run passed 6/10 questions. The failures exposed weak Chinese token splitting in SQLite's default full-text behavior. The basic retriever was updated to add bounded adjacent Chinese terms and deduplicate multi-hit results; the same questions then passed 10/10. This remains an explainable full-text heuristic, not semantic or embedding retrieval.
+
+## Answer-first search verification
+
+The search interface was rechecked with the question “怎样判断线性回归模型是否可靠”. In basic mode it now returns the extracted diagnostic procedure directly, separates reviewed knowledge from raw-source matches, and keeps raw videos collapsed by default. The first evidence link resolves to Bilibili part 4 at 30 seconds with `?p=4&t=30`; desktop and narrow-window checks showed no horizontal overflow.

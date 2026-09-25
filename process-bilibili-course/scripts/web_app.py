@@ -28,6 +28,23 @@ from llm_client import (
 MAX_BODY_BYTES = 1024 * 1024
 
 
+def answer_from_cards(results: list[dict]) -> str:
+    cards = [result for result in results if result.get("kind") == "knowledge_unit"]
+    if not cards:
+        return "没有直接答案"
+    card = cards[0]
+    lines = [card.get("title") or "最相关知识点"]
+    if card.get("when_to_use"):
+        lines.extend(["", f"适用场景：{card['when_to_use']}"])
+    if card.get("steps"):
+        lines.extend(["", "做法："])
+        lines.extend(f"{index}. {step}" for index, step in enumerate(card["steps"], 1))
+    if card.get("constraints"):
+        lines.extend(["", "注意："])
+        lines.extend(f"- {constraint}" for constraint in card["constraints"])
+    return "\n".join(lines)
+
+
 class AppState:
     def __init__(self, workspace: Path):
         self.workspace = workspace.resolve()
@@ -201,8 +218,10 @@ class Handler(BaseHTTPRequestHandler):
                         if key not in seen:
                             seen.add(key)
                             merged.append(result)
-                merged = merged[:20]
-                answer = "没有直接答案" if not merged else "已找到相关知识卡和原始来源。"
+                merged = sorted(
+                    merged, key=lambda item: item.get("kind") != "knowledge_unit"
+                )[:20]
+                answer = answer_from_cards(merged)
                 if client and merged:
                     try:
                         answer = answer_with_ai(client, query_text, merged)
