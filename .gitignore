@@ -6,6 +6,10 @@ venv/
 .env
 .env.*
 .models/
+知识库/
+*.db
+*.db-wal
+*.db-shm
 
 # Generated course materials and temporary media must never enter this repo.
 课程资料/
@@ -17,6 +21,7 @@ venv/
 *.webm
 *.part
 *.log
+学习案例/
 
 # Secrets and browser exports.
 cookies*.txt

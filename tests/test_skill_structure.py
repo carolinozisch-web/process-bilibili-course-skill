@@ -17,9 +17,17 @@ class SkillStructureTests(unittest.TestCase):
             "references/failure-handling.md",
             "references/note-standard.md",
             "references/output-layout.md",
+            "references/knowledge-base.md",
             "scripts/bilibili_pipeline.py",
             "scripts/video_pipeline.py",
             "scripts/course_utils.py",
+            "scripts/favorite_pipeline.py",
+            "scripts/knowledge_db.py",
+            "scripts/llm_client.py",
+            "scripts/web_app.py",
+            "assets/web/index.html",
+            "assets/web/styles.css",
+            "assets/web/app.js",
         ):
             self.assertTrue((SKILL / relative).is_file(), relative)
 

@@ -1,14 +1,24 @@
-# Process Bilibili Course Skill
+# 今天你收了吗 / Process Bilibili Course Skill
 
 [![Validate](https://github.com/carolinozisch-web/process-bilibili-course-skill/actions/workflows/validate.yml/badge.svg)](https://github.com/carolinozisch-web/process-bilibili-course-skill/actions/workflows/validate.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-一个面向 Codex 的公开视频处理 Skill：从 `bilibili.com`、`b23.tv`、`xiaohongshu.com` 或 `xhslink.com` 链接开始，生成压缩音频、本地逐字稿、忠实详细的笔记、可点击目录和独立的精炼合集。
+**把来不及看的收藏，变成经过审核、能追溯来源的方法库。**
+
+> **项目状态：面试演示版（Beta）**  核心闭环已经可以在本地运行；当前仍是单用户工具，公开视频能否自动导入取决于平台的公开访问限制。后续版本会继续在同一仓库更新。
+
+这是一个面向学习型知识工作者的本地 AI 产品，也是可安装到 Codex 的公开视频处理 Skill。它支持两条相互独立的工作流：完整课程归档，以及“导入收藏、三点速览、人工审核、方法卡、来源检索”的个人知识收件箱。
 
 English documentation is available below.
 
 ## 功能特点
 
+- 本地网页“今天你收了吗”，包含收件箱、近 48 小时审核、历史审核、知识库、搜索和模型设置。
+- 持久化单任务队列，页面关闭后继续运行；程序重启后依据清单恢复。
+- 三点速览读取完整逐字稿，基础模式与可选 AI 增强模式都有明确标记。
+- 只有用户明确批准后才能生成方法卡；拒绝不会删除平台收藏或本地来源。
+- 方法卡保留适用场景、步骤、限制、关键词、原视频和时间点。
+- SQLite FTS5 全文检索，并可选用兼容 Chat Completions 的模型做查询扩展和带出处回答。
 - 自动识别多 P 视频，按 B 站 `page`、`cid`、标题和时长建立清单。
 - 自动解析 `b23.tv` 短链接。
 - 解析公开的小红书视频和 `xhslink.com` 分享短链接，也可直接接受包含链接的分享文字。
@@ -21,6 +31,57 @@ English documentation is available below.
 - 每集保存进度，电脑唤醒或 Codex 重启后可从清单断点续作。
 - 自动检查缺失文件、异常短内容、残留缓存和 Markdown 失效链接。
 
+## 产品流程
+
+```mermaid
+flowchart LR
+    A[粘贴公开链接] --> B[本地音频与转写]
+    B --> C[三点速览和时间证据]
+    C --> D{用户审核}
+    D -->|批准| E[方法知识卡]
+    D -->|稍后或拒绝| F[保留原始来源]
+    E --> G[全文检索和可选 AI 回答]
+    G --> H[回到原视频时间点]
+```
+
+核心设计选择：转写默认在本地完成，AI 不代替用户审核，所有提炼结果必须能回到原始来源。
+
+![带三点速览和时间证据的人工审核](docs/today-review.png)
+
+![带来源时间点的方法知识库](docs/today-knowledge.png)
+
+![自然语言检索与原始来源](docs/today-search.png)
+
+[查看演示验收记录](docs/demo-validation.md)
+
+## 启动本地界面
+
+```powershell
+python process-bilibili-course/scripts/web_app.py --workspace 'D:\Video Summary'
+```
+
+Windows 也可以双击 `start-web.cmd`；需要指定其他工作目录时，把目录作为第一个参数传入。
+
+应用只监听 `127.0.0.1`，默认打开 `http://127.0.0.1:8765`；端口被占用时会自动顺延。首次连接旧版知识库时，会先在 `知识库/backups/` 创建备份，再修正旧资料的审核状态。
+
+可选 AI 增强支持使用 Chat Completions 协议的服务。可以在设置页临时填写，也可以使用环境变量：
+
+```text
+VIDEO_KB_LLM_BASE_URL
+VIDEO_KB_LLM_MODEL
+VIDEO_KB_LLM_API_KEY
+```
+
+API Key 只保存在环境变量或当前进程内存中，不会写入 SQLite、日志或导出文件。
+
+### 3 分钟演示顺序
+
+1. 粘贴一条公开短视频链接，并查看后台任务状态。
+2. 打开已完成的三点速览和原文时间证据。
+3. 批准内容，生成或人工确认一张方法卡。
+4. 用自然语言搜索一个实际问题。
+5. 从答案或方法卡跳回原视频对应时间点。
+
 ## 输出结构
 
 ```text
@@ -30,7 +91,12 @@ English documentation is available below.
 │  ├─ 01-详细笔记/
 │  ├─ 02-逐字稿/
 │  └─ 03-音频/           # 16 kHz、48 kbps MP3
-└─ 后台处理文件/<课程名>/ # 清单、时间戳、分段与元数据
+├─ 后台处理文件/<课程名>/ # 清单、时间戳、分段与元数据
+└─ 知识库/
+   ├─ knowledge.db          # 审核状态、方法卡、任务和搜索反馈
+   ├─ backups/              # 数据库升级前备份
+   ├─ curated/              # 可读的知识卡 Markdown 导出
+   └─ exports/              # 每日审核快照
 ```
 
 ## 安装
@@ -118,16 +184,28 @@ python process-bilibili-course/scripts/video_pipeline.py run `
 - 捆绑脚本不会提取浏览器 Cookie，也不会绕过登录、会员、付费、地区或 DRM 限制；此类内容会停止处理。
 - 请遵守平台服务条款、视频作者许可和所在地法律；MIT 许可证仅覆盖本仓库的代码与文档，不覆盖下载内容。
 
+## 当前边界
+
+- 搜索第一阶段是 SQLite 全文检索，不宣称为向量语义检索。
+- 不自动读取私人收藏夹，不提取浏览器 Cookie，也不执行平台侧删除。
+- 当前是本地单用户产品，没有账号、云同步和多设备协作。
+- AI 服务失败时会保留审核决定并退回基础模式，不会伪造方法卡。
+
 如果这个项目对你有帮助，欢迎点一个 Star，也欢迎提交 Issue 或 Pull Request 改进跨平台支持、质量检查和笔记标准。
 
 ---
 
 ## English
 
-This Codex Skill turns a public Bilibili video, multi-part course, or public Xiaohongshu video into compressed audio, local transcripts, faithful detailed notes, a linked index, and a separate concise review collection.
+This local-first product turns public Bilibili or Xiaohongshu videos into resumable course archives or a review-first personal knowledge inbox. Saved items move through local transcription, three-point triage, explicit approval, source-linked method cards, and searchable retrieval.
 
 ### Highlights
 
+- Runs a compact local web interface bound to `127.0.0.1`.
+- Keeps a durable, single-worker processing queue and resumes interrupted manifests.
+- Requires explicit approval before knowledge-card creation.
+- Keeps optional OpenAI-compatible credentials in memory or environment variables only.
+- Returns original URLs and timestamps with retrieved knowledge.
 - Inspects Bilibili metadata before downloading and orders episodes by the official page index.
 - Resolves `b23.tv` short URLs automatically.
 - Resolves public `xhslink.com` shares, accepts full share text, and extracts public Xiaohongshu video metadata without storing share-token queries or signed CDN URLs.

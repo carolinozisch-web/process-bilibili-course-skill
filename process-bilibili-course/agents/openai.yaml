@@ -1,4 +1,4 @@
 interface:
-  display_name: "B站与小红书视频笔记"
-  short_description: "下载并转写公开的 B 站或小红书视频，生成详细笔记、目录与精炼合集"
-  default_prompt: "Use $process-bilibili-course to download and transcribe this public Bilibili or Xiaohongshu video, then create faithful detailed notes and linked indexes."
+  display_name: "今天你收了吗"
+  short_description: "把公开视频课程与收藏整理成可审核、可追溯的本地知识库"
+  default_prompt: "Use $process-bilibili-course to process this public video or saved link with local transcription, review-first triage, and source-linked knowledge cards."

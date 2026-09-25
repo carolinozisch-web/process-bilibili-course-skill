@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>今天你收了吗</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <strong>今天你收了吗</strong>
+        <span>个人知识收件箱</span>
+      </div>
+      <nav aria-label="主要导航">
+        <button class="nav-button active" data-view="inbox">收件箱 <span id="navJobs" class="nav-count">0</span></button>
+        <button class="nav-button" data-view="review">待审核 <span id="navReview" class="nav-count">0</span></button>
+        <button class="nav-button" data-view="knowledge">知识库 <span id="navUnits" class="nav-count">0</span></button>
+        <button class="nav-button" data-view="search">搜索</button>
+        <button class="nav-button" data-view="settings">设置</button>
+      </nav>
+      <div class="sidebar-footer">
+        <span id="serviceDot" class="status-dot"></span>
+        <span id="serviceText">基础模式</span>
+      </div>
+    </aside>
+
+    <main class="main-area">
+      <header class="topbar">
+        <div>
+          <h1 id="pageTitle">收件箱</h1>
+          <p id="pageSubtitle">导入公开链接，处理过程会在本机继续运行。</p>
+        </div>
+        <button id="refreshButton" class="button secondary" type="button">刷新</button>
+      </header>
+
+      <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+
+      <section id="view-inbox" class="view active">
+        <form id="importForm" class="import-panel">
+          <label for="importText">视频链接或分享文字</label>
+          <textarea id="importText" rows="3" placeholder="可一次粘贴多条 B 站或小红书公开链接" required></textarea>
+          <div class="form-row">
+            <label class="checkbox"><input id="startTranscribe" type="checkbox" checked> 立即下载音频并本地转写</label>
+            <button class="button primary" type="submit">加入收件箱</button>
+          </div>
+        </form>
+
+        <div class="metrics" aria-label="知识库概况">
+          <div><span>全部来源</span><strong id="metricSources">0</strong></div>
+          <div><span>等待审核</span><strong id="metricPending">0</strong></div>
+          <div><span>方法卡</span><strong id="metricUnits">0</strong></div>
+          <div><span>处理失败</span><strong id="metricFailed">0</strong></div>
+        </div>
+
+        <div class="section-heading">
+          <div><h2>处理任务</h2><p>本地转写一次只运行一项，刷新页面不会中断。</p></div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>内容</th><th>阶段</th><th>进度</th><th>状态</th><th></th></tr></thead>
+            <tbody id="jobsTable"></tbody>
+          </table>
+          <div id="jobsEmpty" class="empty">还没有处理任务。</div>
+        </div>
+
+        <div class="section-heading"><div><h2>最近导入</h2><p>重复链接只保留一条来源记录。</p></div></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>标题</th><th>平台</th><th>状态</th><th>导入时间</th><th></th></tr></thead>
+            <tbody id="sourcesTable"></tbody>
+          </table>
+          <div id="sourcesEmpty" class="empty">粘贴第一条链接开始整理。</div>
+        </div>
+      </section>
+
+      <section id="view-review" class="view">
+        <div class="segmented" role="tablist" aria-label="审核队列">
+          <button class="active" data-queue="recent">近 48 小时</button>
+          <button data-queue="historical">历史待审</button>
+          <button data-queue="legacy">旧资料</button>
+        </div>
+        <div class="split-view">
+          <div id="reviewList" class="review-list"></div>
+          <article id="reviewDetail" class="detail-pane">
+            <div class="empty large">从左侧选择一条内容查看速览和证据。</div>
+          </article>
+        </div>
+      </section>
+
+      <section id="view-knowledge" class="view">
+        <div class="section-heading">
+          <div><h2>方法知识库</h2><p>每张方法卡都保留原始来源和对应时间点。</p></div>
+        </div>
+        <div id="unitGrid" class="unit-grid"></div>
+        <div id="unitsEmpty" class="empty large">审核并提炼内容后，方法卡会显示在这里。</div>
+      </section>
+
+      <section id="view-search" class="view">
+        <form id="searchForm" class="search-bar">
+          <label class="sr-only" for="searchInput">搜索知识库</label>
+          <input id="searchInput" type="search" placeholder="例如：怎样判断一个回归模型是否可靠？" required>
+          <button class="button primary" type="submit">搜索</button>
+        </form>
+        <div id="searchAnswer" class="answer-panel" hidden></div>
+        <div id="searchResults" class="search-results"></div>
+      </section>
+
+      <section id="view-settings" class="view">
+        <div class="settings-layout">
+          <form id="settingsForm" class="settings-form">
+            <h2>可选 AI 增强</h2>
+            <p>兼容使用 Chat Completions 协议的服务。API Key 只保留在本次程序运行的内存中。</p>
+            <label for="baseUrl">服务地址</label>
+            <input id="baseUrl" type="url" placeholder="https://api.example.com/v1">
+            <label for="modelName">模型名</label>
+            <input id="modelName" type="text" placeholder="模型标识">
+            <label for="apiKey">API Key</label>
+            <input id="apiKey" type="password" autocomplete="off" placeholder="关闭程序后自动清除">
+            <div class="form-row actions-left">
+              <button class="button primary" type="submit">保存并测试</button>
+              <button id="clearKeyButton" class="button danger-text" type="button">清除 Key</button>
+            </div>
+            <div id="llmStatus" class="inline-status">当前为基础模式。</div>
+          </form>
+          <div class="privacy-panel">
+            <h2>本地边界</h2>
+            <dl>
+              <div><dt>网页地址</dt><dd>仅监听 127.0.0.1</dd></div>
+              <div><dt>逐字稿</dt><dd>保存在当前工作目录</dd></div>
+              <div><dt>审核决定</dt><dd>必须由你明确作出</dd></div>
+              <div><dt>平台操作</dt><dd>不会自动删除收藏</dd></div>
+            </dl>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="unitDialog">
+    <form id="unitForm" method="dialog">
+      <div class="dialog-heading"><h2 id="unitDialogTitle">编辑方法卡</h2><button id="closeUnitDialog" class="icon-button" type="button" aria-label="关闭">×</button></div>
+      <input id="unitId" type="hidden">
+      <label for="unitTitle">方法名</label><input id="unitTitle" required>
+      <label for="unitWhen">适用场景</label><textarea id="unitWhen" rows="2"></textarea>
+      <label for="unitSteps">步骤，每行一项</label><textarea id="unitSteps" rows="5"></textarea>
+      <label for="unitConstraints">限制，每行一项</label><textarea id="unitConstraints" rows="3"></textarea>
+      <label for="unitKeywords">关键词，用逗号分隔</label><input id="unitKeywords">
+      <div class="dialog-actions"><button class="button secondary" type="button" id="cancelUnit">取消</button><button class="button primary" type="submit">保存</button></div>
+    </form>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>
