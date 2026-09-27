@@ -1,4 +1,4 @@
-const state = { view: "inbox", queue: "recent", reviewItems: [], selectedSource: null, units: [], searchEventId: null };
+const state = { view: "inbox", queue: "recent", reviewItems: [], selectedSource: null, units: [], tree: [], searchEventId: null };
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -11,9 +11,9 @@ const labels = {
 
 const viewMeta = {
   inbox: ["收件箱", "导入公开链接，处理过程会在本机继续运行。"],
-  review: ["待审核", "先判断是否值得沉淀，再生成正式知识卡。"],
-  knowledge: ["知识库", "可复用的方法，以及它们来自哪里。"],
-  search: ["搜索", "从方法卡和保留的原始来源中寻找答案。"],
+  review: ["待审核", "先判断是否值得沉淀，再加入正式知识库。"],
+  knowledge: ["知识地图", "沿主题结构理解知识，也可以查看每个知识点的出处。"],
+  search: ["搜索", "从提炼好的知识点和保留的原始来源中寻找答案。"],
   settings: ["设置", "AI 增强可选，API Key 不会写入磁盘。"],
 };
 
@@ -146,7 +146,7 @@ function renderReviewDetail(item) {
     <div class="detail-actions">
       ${item.status === "legacy_imported" && !item.summary_50 ? '<button class="button secondary" id="triageButton">生成速览</button>' : ""}
       ${canReview ? '<button class="button primary" data-decision="approve">批准</button><button class="button secondary" data-decision="defer">稍后处理</button><button class="button danger-text" data-decision="reject">拒绝</button>' : ""}
-      ${item.status === "approved" ? '<button class="button primary" id="curateButton">提炼方法卡</button>' : ""}
+      ${item.status === "approved" ? '<button class="button primary" id="curateButton">提炼知识点</button>' : ""}
     </div>
     <h3>三点速览 ${item.ai_mode ? `<span class="badge">${item.ai_mode === "ai" ? "AI 增强" : "基础模式"}</span>` : ""}</h3>
     <div class="summary-box">${escapeHtml(item.summary_50 || "尚未生成速览")}</div>
@@ -165,7 +165,7 @@ function renderReviewDetail(item) {
 
 async function reviewDecision(sourceId, decision) {
   await api(`/api/items/${sourceId}/review`, { method: "POST", body: JSON.stringify({ decision }) });
-  notice({ approve: "已批准，可以提炼方法卡", defer: "已移到稍后处理", reject: "已记录拒绝决定" }[decision]);
+  notice({ approve: "已批准，可以提炼知识点", defer: "已移到稍后处理", reject: "已记录拒绝决定" }[decision]);
   if (decision === "approve") await selectReview(sourceId); else await loadReview();
   loadDashboard();
 }
@@ -174,7 +174,7 @@ async function beginCuration(item) {
   try {
     const result = await api(`/api/items/${item.id}/curate`, { method: "POST", body: "{}" });
     if (result.job_id) {
-      notice("已加入方法卡提炼任务");
+      notice("已加入知识点提炼任务");
       switchView("inbox");
     }
   } catch (error) {
@@ -187,21 +187,112 @@ async function beginCuration(item) {
 }
 
 async function loadUnits() {
-  state.units = await api("/api/units");
-  $("#unitsEmpty").hidden = state.units.length > 0;
-  $("#unitGrid").innerHTML = state.units.map((unit) => `
-    <article class="unit-card">
-      <div><h3>${escapeHtml(unit.title)}</h3><span class="badge success">${escapeHtml(unit.method_type || "方法")}</span></div>
-      <p>${escapeHtml(unit.when_to_use || "未填写适用场景")}</p>
-      <ol>${(unit.steps || []).map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol>
-      <div class="tag-row">${(unit.keywords || []).map((tag) => `<span class="badge">${escapeHtml(tag)}</span>`).join("")}</div>
-      <div class="source-links">${(unit.sources || []).map((source) => `<a href="${escapeHtml(source.source_url_at || source.canonical_url)}" target="_blank" rel="noreferrer">${escapeHtml(source.title || "原始来源")}${source.segment_start != null ? ` · ${Math.floor(source.segment_start / 60)}:${String(Math.floor(source.segment_start % 60)).padStart(2, "0")}` : ""}</a>`).join("") || '<span class="badge warning">尚未关联来源</span>'}</div>
-      <button class="button small secondary edit-unit" data-id="${unit.id}">编辑</button>
-    </article>`).join("");
-  $$(".edit-unit").forEach((button) => button.addEventListener("click", () => {
-    const unit = state.units.find((item) => item.id === Number(button.dataset.id));
-    openUnitDialog(unit, { sourceId: null, manual: false });
+  [state.tree, state.units] = await Promise.all([api("/api/knowledge-tree"), api("/api/units")]);
+  const hasKnowledge = state.units.length > 0;
+  $("#unitsEmpty").hidden = hasKnowledge;
+  $("#knowledgeLayout").hidden = !hasKnowledge;
+  if (!hasKnowledge) return;
+  renderTopicTree();
+  selectTopic(state.tree[0].id);
+}
+
+function topicUnitIds(topic) {
+  const ids = new Set((topic.units || []).map((unit) => unit.id));
+  (topic.children || []).forEach((child) => topicUnitIds(child).forEach((id) => ids.add(id)));
+  return ids;
+}
+
+function findTopic(topicId, topics = state.tree, path = []) {
+  for (const topic of topics) {
+    const nextPath = [...path, topic];
+    if (topic.id === topicId) return { topic, path: nextPath };
+    const found = findTopic(topicId, topic.children || [], nextPath);
+    if (found) return found;
+  }
+  return null;
+}
+
+function topicBranch(topic, depth = 0) {
+  const children = (topic.children || []).map((child) => topicBranch(child, depth + 1)).join("");
+  const units = (topic.units || []).map((unit) => `
+    <button class="tree-unit" data-unit-id="${unit.id}" data-topic-id="${topic.id}">
+      <span>${escapeHtml(unit.title)}</span><span class="node-type">知识点</span>
+    </button>`).join("");
+  const count = topicUnitIds(topic).size;
+  return `<details class="tree-branch depth-${depth}" ${depth < 2 ? "open" : ""}>
+    <summary data-topic-id="${topic.id}"><span>${escapeHtml(topic.title)}</span><span class="tree-count">${count}</span></summary>
+    <div class="tree-children">${children}${units}</div>
+  </details>`;
+}
+
+function renderTopicTree() {
+  $("#topicTree").innerHTML = state.tree.map((topic) => topicBranch(topic)).join("");
+  $$("#topicTree summary").forEach((summary) => summary.addEventListener("click", () => {
+    selectTopic(Number(summary.dataset.topicId));
   }));
+  $$(".tree-unit").forEach((button) => button.addEventListener("click", () => {
+    selectUnit(Number(button.dataset.unitId), Number(button.dataset.topicId));
+  }));
+}
+
+function pathHtml(path) {
+  return path.map((topic) => `<span>${escapeHtml(topic.title)}</span>`).join('<span class="path-separator">›</span>');
+}
+
+function selectTopic(topicId) {
+  const found = findTopic(topicId);
+  if (!found) return;
+  const { topic, path } = found;
+  $$("#topicTree summary").forEach((node) => node.classList.toggle("active", Number(node.dataset.topicId) === topicId));
+  $$(".tree-unit").forEach((node) => node.classList.remove("active"));
+  const childHtml = (topic.children || []).map((child) => `
+    <button class="knowledge-index-row topic-jump" data-topic-id="${child.id}">
+      <span><strong>${escapeHtml(child.title)}</strong><small>${escapeHtml(child.description || "继续展开这个主题")}</small></span>
+      <span>${topicUnitIds(child).size} 个知识点</span>
+    </button>`).join("");
+  const unitHtml = (topic.units || []).map((unit) => `
+    <button class="knowledge-index-row unit-jump" data-unit-id="${unit.id}" data-topic-id="${topic.id}">
+      <span><strong>${escapeHtml(unit.title)}</strong><small>${escapeHtml(unit.when_to_use || "查看知识点内容")}</small></span>
+      <span>查看</span>
+    </button>`).join("");
+  $("#knowledgeDetail").innerHTML = `
+    <div class="knowledge-heading"><span class="badge success">主题</span><h2>${escapeHtml(topic.title)}</h2><p>${escapeHtml(topic.description || "这个主题下的知识结构。")}</p></div>
+    ${childHtml ? `<h3>子主题</h3><div class="knowledge-index">${childHtml}</div>` : ""}
+    ${unitHtml ? `<h3>知识点</h3><div class="knowledge-index">${unitHtml}</div>` : ""}`;
+  $("#knowledgeContext").innerHTML = `
+    <div class="panel-label">当前位置</div><div class="knowledge-path">${pathHtml(path)}</div>
+    <div class="context-stat"><strong>${topicUnitIds(topic).size}</strong><span>个知识点</span></div>
+    <p>选择左侧知识点查看完整内容、相关知识和原始出处。</p>`;
+  $$(".topic-jump").forEach((button) => button.addEventListener("click", () => selectTopic(Number(button.dataset.topicId))));
+  $$(".unit-jump").forEach((button) => button.addEventListener("click", () => selectUnit(Number(button.dataset.unitId), Number(button.dataset.topicId))));
+}
+
+function selectUnit(unitId, topicId) {
+  const unit = state.units.find((item) => item.id === unitId);
+  const found = findTopic(topicId);
+  if (!unit || !found) return;
+  $$("#topicTree summary").forEach((node) => node.classList.remove("active"));
+  $$(".tree-unit").forEach((node) => node.classList.toggle("active",
+    Number(node.dataset.unitId) === unitId && Number(node.dataset.topicId) === topicId));
+  const steps = (unit.steps || []).map((step) => `<li>${escapeHtml(step)}</li>`).join("");
+  const constraints = (unit.constraints || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+  $("#knowledgeDetail").innerHTML = `
+    <div class="knowledge-heading"><span class="badge success">${escapeHtml(unit.method_type || "知识点")}</span><h2>${escapeHtml(unit.title)}</h2><p>${escapeHtml(unit.when_to_use || "未填写适用场景")}</p></div>
+    ${steps ? `<h3>核心内容</h3><ol class="knowledge-steps">${steps}</ol>` : ""}
+    ${constraints ? `<h3>限制与提醒</h3><ul class="knowledge-steps">${constraints}</ul>` : ""}
+    ${(unit.keywords || []).length ? `<div class="tag-row">${unit.keywords.map((tag) => `<span class="badge">${escapeHtml(tag)}</span>`).join("")}</div>` : ""}
+    <button class="button small secondary" id="editSelectedUnit">编辑知识点</button>`;
+  const siblings = (found.topic.units || []).filter((item) => item.id !== unitId);
+  const sources = (unit.sources || []).map((source) => {
+    const time = source.segment_start != null ? ` · ${Math.floor(source.segment_start / 60)}:${String(Math.floor(source.segment_start % 60)).padStart(2, "0")}` : "";
+    return `<a href="${escapeHtml(source.source_url_at || source.canonical_url)}" target="_blank" rel="noreferrer">${escapeHtml(source.title || "原始来源")}${time}</a>`;
+  }).join("");
+  $("#knowledgeContext").innerHTML = `
+    <div class="panel-label">所属主题</div><div class="knowledge-path">${pathHtml(found.path)}</div>
+    ${siblings.length ? `<h3>同一主题</h3><div class="related-list">${siblings.map((item) => `<button class="related-unit" data-unit-id="${item.id}">${escapeHtml(item.title)}</button>`).join("")}</div>` : ""}
+    <h3>核对出处</h3><div class="source-links">${sources || '<span class="badge warning">尚未关联来源</span>'}</div>`;
+  $("#editSelectedUnit").addEventListener("click", () => openUnitDialog(unit, { sourceId: null, manual: false }));
+  $$(".related-unit").forEach((button) => button.addEventListener("click", () => selectUnit(Number(button.dataset.unitId), topicId)));
 }
 
 function openUnitDialog(unit, context) {
@@ -214,7 +305,7 @@ function openUnitDialog(unit, context) {
   $("#unitSteps").value = (unit.steps || []).join("\n");
   $("#unitConstraints").value = (unit.constraints || []).join("\n");
   $("#unitKeywords").value = (unit.keywords || []).join("，");
-  $("#unitDialogTitle").textContent = context.manual ? "人工确认方法卡" : "编辑方法卡";
+  $("#unitDialogTitle").textContent = context.manual ? "人工确认知识点" : "编辑知识点";
   dialog.showModal();
 }
 
@@ -234,10 +325,10 @@ async function saveUnit(event) {
   const payload = unitPayload();
   if (dialog.dataset.manual === "true") {
     await api(`/api/items/${dialog.dataset.sourceId}/curate`, { method: "POST", body: JSON.stringify({ units: [payload] }) });
-    notice("方法卡已保存并关联原始来源");
+    notice("知识点已保存并关联原始来源");
   } else {
     await api(`/api/units/${$("#unitId").value}`, { method: "PUT", body: JSON.stringify(payload) });
-    notice("方法卡已更新");
+    notice("知识点已更新");
   }
   dialog.close();
   await switchView("knowledge");
@@ -264,7 +355,7 @@ async function runSearch(event) {
         const time = source.segment_start != null ? ` · ${Math.floor(source.segment_start / 60)}:${String(Math.floor(source.segment_start % 60)).padStart(2, "0")}` : "";
         return `<a href="${escapeHtml(source.source_url_at || source.canonical_url)}" target="_blank" rel="noreferrer">${escapeHtml(source.title || "原始来源")}${time}</a>`;
       }).join("");
-      return `<article class="search-result method-result"><div class="result-meta"><span class="badge success">方法卡 ${index + 1}</span></div><h3>${escapeHtml(result.title || "未命名方法")}</h3><p>${escapeHtml(result.when_to_use || "")}</p>${steps}${constraints}${links ? `<details class="evidence-details"><summary>核对来源和时间点</summary><div class="source-links">${links}</div></details>` : ""}</article>`;
+      return `<article class="search-result method-result"><div class="result-meta"><span class="badge success">知识点 ${index + 1}</span></div><h3>${escapeHtml(result.title || "未命名知识点")}</h3><p>${escapeHtml(result.when_to_use || "")}</p>${steps}${constraints}${links ? `<details class="evidence-details"><summary>核对来源和时间点</summary><div class="source-links">${links}</div></details>` : ""}</article>`;
     }).join("");
     const sourceHtml = sources.length ? `<details class="raw-results"><summary>查看原始视频匹配（${sources.length}）</summary><div>${sources.map((result) => `<article class="search-result source-result"><div class="result-meta"><span class="badge">原始来源</span></div><h3>${escapeHtml(result.title || "未命名来源")}</h3><p>${escapeHtml(result.summary_50 || "命中原始逐字稿")}</p><a href="${escapeHtml(result.source_url_at || result.canonical_url)}" target="_blank" rel="noreferrer">打开对应分集</a></article>`).join("")}</div></details>` : "";
     $("#searchResults").innerHTML = cards.length ? `<h2 class="search-heading">提炼好的知识点</h2>${cardHtml}${sourceHtml}<div class="feedback"><span>这个答案有帮助吗？</span><button class="button small secondary search-feedback" data-value="helpful">有帮助</button><button class="button small secondary search-feedback" data-value="not_helpful">没有</button></div>` : `<div class="empty large">知识库中没有直接答案，可以换一个更具体的问题。</div>${sourceHtml}`;

@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urlparse
 from favorite_pipeline import JobWorker, curate_source, import_text, review_source, transcript_text
 from knowledge_db import (
     connect, create_job, dashboard_counts, get_job, get_source, list_jobs, list_sources,
-    list_units, log_search, record_search_feedback, retry_job, review_queue, search,
+    knowledge_tree, list_units, log_search, record_search_feedback, retry_job, review_queue, search,
     source_detail, update_unit,
 )
 from llm_client import (
@@ -199,6 +199,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(list_jobs(db))
             elif path == "/api/units":
                 self._json(list_units(db))
+            elif path == "/api/knowledge-tree":
+                self._json(knowledge_tree(db))
             elif path == "/api/search":
                 query_text = query.get("q", [""])[0].strip()
                 if not query_text:

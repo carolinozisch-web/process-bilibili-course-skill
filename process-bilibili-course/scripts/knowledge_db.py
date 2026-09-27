@@ -13,7 +13,7 @@ from typing import Iterable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SOURCE_STATUSES = {
     "discovered", "transcribed", "triage_ready", "approved", "deferred",
     "rejected", "curated", "legacy_imported", "error",
@@ -86,6 +86,23 @@ CREATE TABLE IF NOT EXISTS unit_sources (
     new_points TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY(knowledge_unit_id, source_item_id)
 );
+CREATE TABLE IF NOT EXISTS knowledge_topics (
+    id INTEGER PRIMARY KEY,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    parent_id INTEGER REFERENCES knowledge_topics(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_topics_parent_position
+    ON knowledge_topics(parent_id, position, id);
+CREATE TABLE IF NOT EXISTS topic_units (
+    topic_id INTEGER NOT NULL REFERENCES knowledge_topics(id) ON DELETE CASCADE,
+    knowledge_unit_id INTEGER NOT NULL REFERENCES knowledge_units(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(topic_id, knowledge_unit_id)
+);
 CREATE TABLE IF NOT EXISTS search_events (
     id INTEGER PRIMARY KEY,
     query TEXT NOT NULL,
@@ -138,15 +155,23 @@ def _table_exists(db: sqlite3.Connection, name: str) -> bool:
     return bool(db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone())
 
 
-def _backup_legacy_database(path: Path) -> Path | None:
+def _backup_database_for_upgrade(path: Path) -> Path | None:
     if not path.exists() or path.stat().st_size == 0:
         return None
     probe = sqlite3.connect(str(path))
     try:
-        legacy = _table_exists(probe, "source_items") and not _table_exists(probe, "schema_meta")
+        if not _table_exists(probe, "source_items"):
+            return None
+        if _table_exists(probe, "schema_meta"):
+            row = probe.execute(
+                "SELECT value FROM schema_meta WHERE key='schema_version'"
+            ).fetchone()
+            version = int(row[0]) if row and str(row[0]).isdigit() else 0
+        else:
+            version = 0
     finally:
         probe.close()
-    if not legacy:
+    if version >= SCHEMA_VERSION:
         return None
     backup_dir = path.parent / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
@@ -181,7 +206,7 @@ def _migrate(db: sqlite3.Connection) -> None:
 def connect(path: str | Path) -> sqlite3.Connection:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    _backup_legacy_database(path)
+    _backup_database_for_upgrade(path)
     db = sqlite3.connect(str(path), timeout=30)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA journal_mode=WAL")
@@ -482,6 +507,80 @@ def list_units(db: sqlite3.Connection, limit: int = 100) -> list[dict]:
         "SELECT id FROM knowledge_units ORDER BY updated_at DESC LIMIT ?", (limit,)
     )]
     return [get_unit(db, unit_id) for unit_id in ids]
+
+
+def add_topic(db: sqlite3.Connection, title: str, *, description: str = "",
+              parent_id: int | None = None, position: int = 0) -> int:
+    title = title.strip()
+    if not title:
+        raise ValueError("topic title is required")
+    if parent_id is not None and not db.execute(
+        "SELECT 1 FROM knowledge_topics WHERE id=?", (parent_id,)
+    ).fetchone():
+        raise ValueError(f"parent topic not found: {parent_id}")
+    existing = db.execute(
+        "SELECT id FROM knowledge_topics WHERE title=? AND parent_id IS ?",
+        (title, parent_id),
+    ).fetchone()
+    stamp = now_iso()
+    if existing:
+        topic_id = int(existing[0])
+        db.execute("""
+            UPDATE knowledge_topics SET description=?, position=?, updated_at=? WHERE id=?
+        """, (description, position, stamp, topic_id))
+    else:
+        db.execute("""
+            INSERT INTO knowledge_topics(title, description, parent_id, position, created_at, updated_at)
+            VALUES(?,?,?,?,?,?)
+        """, (title, description, parent_id, position, stamp, stamp))
+        topic_id = int(db.execute("SELECT last_insert_rowid()").fetchone()[0])
+    db.commit()
+    return topic_id
+
+
+def link_topic_unit(db: sqlite3.Connection, topic_id: int, unit_id: int,
+                    position: int = 0) -> None:
+    if not db.execute("SELECT 1 FROM knowledge_topics WHERE id=?", (topic_id,)).fetchone():
+        raise ValueError(f"topic not found: {topic_id}")
+    if not db.execute("SELECT 1 FROM knowledge_units WHERE id=?", (unit_id,)).fetchone():
+        raise ValueError(f"knowledge unit not found: {unit_id}")
+    db.execute("""
+        INSERT INTO topic_units(topic_id, knowledge_unit_id, position) VALUES(?,?,?)
+        ON CONFLICT(topic_id, knowledge_unit_id) DO UPDATE SET position=excluded.position
+    """, (topic_id, unit_id, position))
+    db.commit()
+
+
+def knowledge_tree(db: sqlite3.Connection) -> list[dict]:
+    topics = {
+        row["id"]: {**dict(row), "kind": "topic", "children": [], "units": []}
+        for row in db.execute("""
+            SELECT id, title, description, parent_id, position
+            FROM knowledge_topics ORDER BY position, id
+        """)
+    }
+    linked_ids = set()
+    for row in db.execute("""
+        SELECT topic_id, knowledge_unit_id FROM topic_units
+        ORDER BY topic_id, position, knowledge_unit_id
+    """):
+        topic = topics.get(row["topic_id"])
+        unit = get_unit(db, row["knowledge_unit_id"])
+        if topic and unit:
+            topic["units"].append(unit)
+            linked_ids.add(unit["id"])
+    roots = []
+    for topic in topics.values():
+        parent = topics.get(topic["parent_id"])
+        (parent["children"] if parent else roots).append(topic)
+    ungrouped = [unit for unit in list_units(db, 500) if unit["id"] not in linked_ids]
+    if ungrouped:
+        roots.append({
+            "id": 0, "title": "未分类知识", "description": "尚未加入主题树的知识点。",
+            "parent_id": None, "position": 9999, "kind": "topic",
+            "children": [], "units": ungrouped,
+        })
+    return roots
 
 
 def index_source(db: sqlite3.Connection, source_id: int, text: str) -> None:

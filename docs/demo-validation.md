@@ -47,3 +47,7 @@ The first run passed 6/10 questions. The failures exposed weak Chinese token spl
 ## Answer-first search verification
 
 The search interface was rechecked with the question “怎样判断线性回归模型是否可靠”. In basic mode it now returns the extracted diagnostic procedure directly, separates reviewed knowledge from raw-source matches, and keeps raw videos collapsed by default. The first evidence link resolves to Bilibili part 4 at 30 seconds with `?p=4&t=30`; desktop and narrow-window checks showed no horizontal overflow.
+
+## Topic-tree prototype
+
+The 21 regression-analysis knowledge points were organized into a three-level tree rooted at “回归分析”, with five main sections: preparation, model building, interpretation, diagnostics, and model selection. Database migration preserved all 85 sources and 21 knowledge points, while adding 23 topics and 21 topic memberships. Desktop and narrow-window checks traversed “模型诊断 → 残差图与 QQ 图 → 用残差图和 QQ 图诊断线性回归” and retained the exact part-4, 30-second evidence link without layout overflow.

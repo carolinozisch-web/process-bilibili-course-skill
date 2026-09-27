@@ -25,6 +25,10 @@ Transcription and AI curation use `processing_jobs`. Only one worker runs locall
 
 SQLite FTS5 is the first-stage index. Literal `LIKE` fallback preserves useful Chinese matching when tokenization is weak. Optional AI may expand a query and synthesize a cited answer from retrieved results; it does not replace retrieval. Search must include timestamps and original URLs when available and say `没有直接答案` when no evidence is found.
 
+## Topic tree
+
+`knowledge_topics` and `topic_units` organize approved knowledge units without rewriting them. Topics may be nested to any depth, and one unit may belong to multiple topics. The topic tree is an organizational view: source links and review state remain attached to the underlying knowledge unit. Cross-topic relations such as prerequisite, contrast, and complement are intentionally deferred until the hierarchy has been validated with real use.
+
 ## Model settings and privacy
 
 The optional client accepts an OpenAI-compatible Chat Completions base URL, model name, and bearer API key. The key may come from `VIDEO_KB_LLM_API_KEY` or the current web process. Never persist it. Base URL and model may be shown in the UI; the key must not be returned, logged, placed in job payloads, or committed.

@@ -45,6 +45,7 @@ class WebAppTests(unittest.TestCase):
             self.assertIsInstance(queued["job_id"], int)
             dashboard = client.get("/api/dashboard").json()
             self.assertEqual(dashboard["sources"], 1)
+            self.assertEqual(client.get("/api/knowledge-tree").json(), [])
             no_answer = client.get("/api/search", params={"q": "完全不存在的答案"}).json()
             self.assertEqual(no_answer["answer"], "没有直接答案")
             client.put("/api/settings/llm", json={

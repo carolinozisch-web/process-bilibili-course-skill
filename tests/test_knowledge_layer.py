@@ -17,8 +17,8 @@ sys.path.insert(0, str(SCRIPTS))
 
 from favorite_pipeline import curate_source, make_basic_triage, review_source  # noqa: E402
 from knowledge_db import (  # noqa: E402
-    add_triage, add_unit, connect, create_job, get_job, link_unit_source,
-    list_jobs, requeue_interrupted_jobs, retry_job, review_queue, search,
+    add_topic, add_triage, add_unit, connect, create_job, get_job, knowledge_tree,
+    link_topic_unit, link_unit_source, list_jobs, requeue_interrupted_jobs, retry_job, review_queue, search,
     set_status, source_detail, update_job, upsert_source,
 )
 from llm_client import LLMSettings, OpenAICompatibleClient, triage_with_ai  # noqa: E402
@@ -149,6 +149,23 @@ class KnowledgeLayerTests(unittest.TestCase):
         self.assertEqual(empty_result["unit_ids"], [])
         self.assertEqual(source_detail(self.db, empty_source)["status"], "curated")
 
+    def test_knowledge_tree_supports_nested_topics_and_shared_units(self):
+        first = add_unit(self.db, {"title": "残差诊断", "status": "approved"})
+        second = add_unit(self.db, {"title": "VIF 检查", "status": "approved"})
+        root = add_topic(self.db, "回归分析", description="从建模到诊断")
+        diagnostics = add_topic(self.db, "模型诊断", parent_id=root)
+        link_topic_unit(self.db, diagnostics, first, 1)
+        link_topic_unit(self.db, diagnostics, second, 2)
+        link_topic_unit(self.db, root, first, 1)
+
+        tree = knowledge_tree(self.db)
+        self.assertEqual(tree[0]["title"], "回归分析")
+        self.assertEqual(tree[0]["units"][0]["title"], "残差诊断")
+        self.assertEqual(
+            [unit["title"] for unit in tree[0]["children"][0]["units"]],
+            ["残差诊断", "VIF 检查"],
+        )
+
     def test_openai_compatible_triage_parses_json(self):
         def responder(request: httpx.Request) -> httpx.Response:
             self.assertNotIn(b"secret-key", request.content)
@@ -200,7 +217,7 @@ class MigrationTests(unittest.TestCase):
             upgraded = connect(path)
             row = upgraded.execute("SELECT status, reviewed_at, review_decision FROM source_items").fetchone()
             self.assertEqual(tuple(row), ("legacy_imported", None, "legacy_migration"))
-            self.assertEqual(upgraded.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0], "2")
+            self.assertEqual(upgraded.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0], "3")
             upgraded.close()
             self.assertEqual(len(list((path.parent / "backups").glob("*.db"))), 1)
 

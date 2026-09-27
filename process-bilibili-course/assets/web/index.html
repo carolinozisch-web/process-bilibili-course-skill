@@ -50,7 +50,7 @@
         <div class="metrics" aria-label="知识库概况">
           <div><span>全部来源</span><strong id="metricSources">0</strong></div>
           <div><span>等待审核</span><strong id="metricPending">0</strong></div>
-          <div><span>方法卡</span><strong id="metricUnits">0</strong></div>
+          <div><span>知识点</span><strong id="metricUnits">0</strong></div>
           <div><span>处理失败</span><strong id="metricFailed">0</strong></div>
         </div>
 
@@ -91,10 +91,17 @@
 
       <section id="view-knowledge" class="view">
         <div class="section-heading">
-          <div><h2>方法知识库</h2><p>每张方法卡都保留原始来源和对应时间点。</p></div>
+          <div><h2>知识地图</h2><p>从主题逐层展开知识点，原始视频仅作为出处保留。</p></div>
         </div>
-        <div id="unitGrid" class="unit-grid"></div>
-        <div id="unitsEmpty" class="empty large">审核并提炼内容后，方法卡会显示在这里。</div>
+        <div id="knowledgeLayout" class="knowledge-layout" hidden>
+          <aside class="topic-panel">
+            <div class="panel-label">主题结构</div>
+            <div id="topicTree" class="topic-tree"></div>
+          </aside>
+          <article id="knowledgeDetail" class="knowledge-detail"></article>
+          <aside id="knowledgeContext" class="knowledge-context"></aside>
+        </div>
+        <div id="unitsEmpty" class="empty large">审核并提炼内容后，知识点会显示在这里。</div>
       </section>
 
       <section id="view-search" class="view">
@@ -140,9 +147,9 @@
 
   <dialog id="unitDialog">
     <form id="unitForm" method="dialog">
-      <div class="dialog-heading"><h2 id="unitDialogTitle">编辑方法卡</h2><button id="closeUnitDialog" class="icon-button" type="button" aria-label="关闭">×</button></div>
+      <div class="dialog-heading"><h2 id="unitDialogTitle">编辑知识点</h2><button id="closeUnitDialog" class="icon-button" type="button" aria-label="关闭">×</button></div>
       <input id="unitId" type="hidden">
-      <label for="unitTitle">方法名</label><input id="unitTitle" required>
+      <label for="unitTitle">知识点名称</label><input id="unitTitle" required>
       <label for="unitWhen">适用场景</label><textarea id="unitWhen" rows="2"></textarea>
       <label for="unitSteps">步骤，每行一项</label><textarea id="unitSteps" rows="5"></textarea>
       <label for="unitConstraints">限制，每行一项</label><textarea id="unitConstraints" rows="3"></textarea>
