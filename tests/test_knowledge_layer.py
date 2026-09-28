@@ -17,7 +17,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "process-bilibili-course" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from favorite_pipeline import curate_source, import_text, make_basic_triage, review_source, transcribe_source  # noqa: E402
+from favorite_pipeline import (  # noqa: E402
+    curate_source, import_text, likely_duplicate, make_basic_triage, review_source, transcribe_source,
+)
 from knowledge_db import (  # noqa: E402
     add_topic, add_triage, add_unit, connect, create_job, get_job, knowledge_tree,
     link_topic_unit, link_unit_source, list_jobs, requeue_interrupted_jobs, retry_job, review_queue, search,
@@ -114,12 +116,32 @@ class KnowledgeLayerTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["env"]["PYTHONIOENCODING"], "utf-8")
 
     def test_basic_triage_samples_full_transcript(self):
-        text = "开头先定义问题。" + "中间步骤需要拆分。" * 20 + "最后必须检查结果。"
-        timed = "[00:01] 开头证据\n[01:20] 中间证据\n[03:40] 结尾证据\n"
+        text = "今天介绍流程。投递时记录岗位和进度。经历要用数据证明结果。面试提前准备三个故事。下一期再展开。"
+        timed = ("[00:00:01.000] 今天介绍流程\n[00:00:12.300] 投递时记录岗位和进度\n"
+                 "[00:01:20.500] 经历要用数据证明结果\n[00:02:10.000] 面试提前准备三个故事\n"
+                 "[00:03:40.000] 下一期再展开\n")
         data = make_basic_triage(text, timed, "示例")
         self.assertLessEqual(len(data["summary_50"]), 50)
-        self.assertEqual([row["time"] for row in data["evidence"]], ["00:01", "01:20", "03:40"])
+        self.assertEqual(
+            [row["time"] for row in data["evidence"]],
+            ["00:00:12", "00:01:20", "00:02:10"],
+        )
+        self.assertNotIn("下一期", "".join(data[f"point_{index}"] for index in range(1, 4)))
         self.assertEqual(data["ai_mode"], "basic")
+
+    def test_duplicate_candidates_require_strong_title_similarity(self):
+        source = {
+            "title": "手握12个offer的秘诀就是我太会秋招了",
+            "canonical_url": "https://www.xiaohongshu.com/discovery/item/abc",
+        }
+        self.assertFalse(likely_duplicate(source, {
+            "title": "R语言入门 多元线性回归与共线性处理",
+            "canonical_url": "https://www.bilibili.com/video/BV123",
+        }))
+        self.assertTrue(likely_duplicate(source, {
+            "title": "手握12个offer的秘诀就是我太会秋招了！完整版",
+            "canonical_url": "https://www.bilibili.com/video/BV456",
+        }))
 
     def test_search_returns_unit_with_timestamped_source(self):
         source_id = self.source()

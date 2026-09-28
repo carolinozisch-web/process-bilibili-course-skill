@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import difflib
 import json
 import os
 import re
@@ -106,19 +107,67 @@ def _sample_evenly(values: list[str], count: int = 3) -> list[str]:
     return [unique[position] for position in positions]
 
 
+def _knowledge_score(value: str) -> int:
+    action_hits = len(re.findall(
+        r"不要|需要|应该|建议|推荐|记得|提前|设置|记录|跟踪|使用|采用|重点|核心|策略|步骤|方法|改|准备|总结|提炼|证明",
+        value,
+    ))
+    noise_hits = len(re.findall(r"今天|这期|下一期|收藏|关注|一定能|我说真的|别慌|很正常|不会差", value))
+    concrete = bool(re.search(r"\d|第一|第二|第三|例如|比如|包括|分为|数据|结果", value))
+    return action_hits * 3 + int(concrete) * 2 + int(10 <= len(value) <= 70) - noise_hits * 4
+
+
+def _select_knowledge_rows(rows: list[tuple[str, str]], count: int = 3) -> list[tuple[str, str]]:
+    candidates = [(index, time, text.strip(" ，。；;,.!?！？"), _knowledge_score(text))
+                  for index, (time, text) in enumerate(rows) if len(text.strip()) >= 6]
+    candidates.sort(key=lambda row: row[3], reverse=True)
+    selected: list[tuple[int, str, str]] = []
+    for index, time, text, score in candidates:
+        if score <= 0:
+            continue
+        if any(difflib.SequenceMatcher(None, text, existing).ratio() >= 0.62 for _, _, existing in selected):
+            continue
+        selected.append((index, time, text))
+        if len(selected) == count:
+            break
+    if len(selected) < count:
+        remaining = [(index, time, text) for index, time, text, _ in candidates
+                     if not any(index == chosen[0] for chosen in selected)]
+        selected.extend(_sample_evenly(remaining, count - len(selected)))
+    return [(time, text) for _, time, text in sorted(selected[:count])]
+
+
+def likely_duplicate(source: dict, candidate: dict) -> bool:
+    current_title = re.sub(r"\W+", "", str(source.get("title") or "")).lower()
+    candidate_title = re.sub(r"\W+", "", str(candidate.get("title") or "")).lower()
+    if min(len(current_title), len(candidate_title)) < 8:
+        return False
+    current_base = str(source.get("canonical_url") or "").split("#", 1)[0]
+    candidate_base = str(candidate.get("canonical_url") or "").split("#", 1)[0]
+    if current_base and current_base == candidate_base:
+        return False
+    similarity = difflib.SequenceMatcher(None, current_title, candidate_title).ratio()
+    return similarity >= 0.8 or (
+        min(len(current_title), len(candidate_title)) >= 12
+        and (current_title in candidate_title or candidate_title in current_title)
+    )
+
+
 def make_basic_triage(text: str, timestamped: str = "", title: str = "") -> dict:
     clean = re.sub(r"\s+", " ", text).strip()
-    sentences = [part.strip(" ，。；;,.!?！？") for part in re.split(r"[。！？!?；;\n]", clean)
-                 if len(part.strip()) >= 6]
-    selected = _sample_evenly(sentences, 3)
+    timed_rows = re.findall(r"\[((?:\d{1,2}:)?\d{2}:\d{2})(?:\.\d{1,3})?\]\s*([^\n]+)", timestamped)
+    rows = timed_rows or [
+        ("", part.strip(" ，。；;,.!?！？"))
+        for part in re.split(r"[。！？!?；;\n]", clean) if len(part.strip()) >= 6
+    ]
+    selected_rows = _select_knowledge_rows(rows, 3)
+    selected = [text for _, text in selected_rows]
     summary, points = compact_summary(selected)
-    timed_lines = re.findall(r"\[((?:\d{1,2}:)?\d{2}:\d{2})\]\s*([^\n]+)", timestamped)
-    evidence_rows = _sample_evenly([f"{time}\t{line}" for time, line in timed_lines], 3)
-    evidence = []
-    for index, row in enumerate(evidence_rows):
-        time, excerpt = row.split("\t", 1)
-        evidence.append({"point": points[min(index, 2)], "time": time, "excerpt": excerpt[:120]})
-    keywords = re.findall(r"[A-Za-z][A-Za-z0-9_.+#-]{1,}|[\u4e00-\u9fff]{2,6}", clean)
+    evidence = [
+        {"point": points[index], "time": time, "excerpt": excerpt[:120]}
+        for index, (time, excerpt) in enumerate(selected_rows) if time
+    ]
+    keywords = re.findall(r"[A-Za-z][A-Za-z0-9_.+#-]{1,}|[\u4e00-\u9fff]{2,6}", " ".join(selected))
     return {
         "summary_50": summary,
         "point_1": points[0], "point_2": points[1], "point_3": points[2],
@@ -224,8 +273,9 @@ def triage_source(db, workspace: Path, source_id: int,
     progress("triage", 75, "正在阅读完整逐字稿并生成三点速览")
     data = triage_with_ai(client, timestamped_text(source, workspace) or text, source.get("title", "")) \
         if client else make_basic_triage(text, timestamped_text(source, workspace), source.get("title", ""))
-    related = [row for row in search(db, " ".join(data.get("keywords", [])[:3]), 6)
-               if row.get("kind") == "source" and row.get("id") != source_id]
+    related = [row for row in search(db, source.get("title", ""), 12)
+               if row.get("kind") == "source" and row.get("id") != source_id
+               and likely_duplicate(source, row)]
     data["possible_duplicates"] = [
         {"source_id": row["id"], "title": row.get("title", ""), "url": row.get("canonical_url", "")}
         for row in related[:3]

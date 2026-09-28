@@ -152,7 +152,7 @@ function renderReviewDetail(item) {
     <div class="summary-box">${escapeHtml(item.summary_50 || "尚未生成速览")}</div>
     <h3>原文证据</h3>
     <div class="evidence-list">${evidence.length ? evidence.map((row) => `<div class="evidence-item"><span class="evidence-time">${escapeHtml(row.time || "--:--")}</span><span>${escapeHtml(row.excerpt || row.point || "")}</span></div>`).join("") : '<div class="empty">暂无时间证据。</div>'}</div>
-    ${duplicates.length ? `<h3>可能重复</h3><div class="tag-row">${duplicates.map((row) => `<span class="badge">${escapeHtml(row.title || "相似来源")}</span>`).join("")}</div>` : ""}
+    <h3>可能重复</h3>${duplicates.length ? `<div class="tag-row">${duplicates.map((row) => `<span class="badge">${escapeHtml(row.title || "相似来源")}</span>`).join("")}</div>` : '<div class="empty">无疑似重复。</div>'}
     <h3>逐字稿节选</h3><div class="transcript">${escapeHtml(item.transcript_excerpt || "没有可显示的逐字稿")}</div>`;
   $$("[data-decision]").forEach((button) => button.addEventListener("click", () => reviewDecision(item.id, button.dataset.decision)));
   $("#triageButton")?.addEventListener("click", async () => {
