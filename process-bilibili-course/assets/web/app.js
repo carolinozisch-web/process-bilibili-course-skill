@@ -150,11 +150,13 @@ function reviewQuestions(item) {
   return (item.key_questions || []).length ? item.key_questions : legacyQuestions(item);
 }
 
-function questionBlock(question, index) {
+function questionBlock(item, question, index) {
   const evidence = question.evidence || [];
   const evidenceHtml = evidence.length ? evidence.map((row) => {
     const time = escapeHtml(row.time || "原文");
-    const link = row.source_url_at ? `<a class="evidence-time" href="${escapeHtml(row.source_url_at)}" target="_blank" rel="noreferrer">${time}</a>` : `<span class="evidence-time">${time}</span>`;
+    const link = item.platform === "bilibili" && row.source_url_at
+      ? `<a class="evidence-time" href="${escapeHtml(row.source_url_at)}" target="_blank" rel="noreferrer">${time}</a>`
+      : `<span class="evidence-time">${time}</span>`;
     return `<div class="evidence-item">${link}<span>${escapeHtml(row.excerpt || "对应原文" )}</span></div>`;
   }).join("") : '<div class="empty">暂无时间证据。</div>';
   return `<article class="question-block"><div class="question-number">${index + 1}</div><div class="question-content"><h3>${escapeHtml(question.question)}</h3><p>${escapeHtml(question.answer)}</p><details class="question-evidence"><summary>查看原文依据（${evidence.length}）</summary><div class="evidence-list">${evidenceHtml}</div></details></div></article>`;
@@ -182,7 +184,7 @@ function renderReviewDetail(item) {
       ${item.status === "approved" ? '<button class="button primary" id="curateButton">提炼知识点</button>' : ""}
     </div>
     <h3>这条内容回答了什么 ${item.ai_mode ? `<span class="badge">${item.ai_mode === "ai" ? "AI 增强" : "基础提取"}</span>` : ""}</h3>
-    <div class="question-list">${questions.length ? questions.map(questionBlock).join("") : '<div class="empty">尚未提取到可审核的问题。</div>'}</div>
+    <div class="question-list">${questions.length ? questions.map((question, index) => questionBlock(item, question, index)).join("") : '<div class="empty">尚未提取到可审核的问题。</div>'}</div>
     ${canReview ? questionEditor(item, questions) : ""}
     <h3>可能重复</h3>${duplicates.length ? `<div class="tag-row">${duplicates.map((row) => `<span class="badge">${escapeHtml(row.title || "相似来源")}</span>`).join("")}</div>` : '<div class="empty">无疑似重复。</div>'}
     <h3>逐字稿节选</h3><div class="transcript">${escapeHtml(item.transcript_excerpt || "没有可显示的逐字稿")}</div>`;
@@ -412,7 +414,14 @@ async function runSearch(event) {
     const questionSources = sources.filter((result) => result.matched_question);
     const questionHtml = questionSources.map((result) => {
       const question = result.matched_question;
-      const evidence = (question.evidence || []).map((row) => `<div class="evidence-item"><a class="evidence-time" href="${escapeHtml(row.source_url_at || result.source_url_at || result.canonical_url)}" target="_blank" rel="noreferrer">${escapeHtml(row.time || "原文")}</a><span>${escapeHtml(row.excerpt || "对应原文")}</span></div>`).join("");
+      const evidence = (question.evidence || []).map((row) => {
+        const time = escapeHtml(row.time || "原文");
+        const source = escapeHtml(row.source_url_at || result.source_url_at || result.canonical_url);
+        const label = result.platform === "bilibili" && row.time
+          ? `<a class="evidence-time" href="${source}" target="_blank" rel="noreferrer">${time}</a>`
+          : `<span class="evidence-time">${time}</span>`;
+        return `<div class="evidence-item">${label}<span>${escapeHtml(row.excerpt || "对应原文")}</span></div>`;
+      }).join("");
       return `<article class="search-result method-result"><div class="result-meta"><span class="badge ${result.status === "triage_ready" ? "warning" : "success"}">${result.status === "triage_ready" ? "待审核问答" : "视频问答"}</span></div><h3>${escapeHtml(question.question)}</h3><p>${escapeHtml(question.answer)}</p>${evidence ? `<details class="evidence-details"><summary>核对原文依据</summary><div class="evidence-list">${evidence}</div></details>` : ""}</article>`;
     }).join("");
     const rawSources = sources.filter((result) => !result.matched_question);
