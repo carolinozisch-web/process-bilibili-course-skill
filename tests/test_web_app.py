@@ -63,6 +63,20 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("1. 检查残差图", answer)
         self.assertIn("注意：", answer)
 
+    def test_xiaohongshu_share_url_reaches_worker_memory(self):
+        share_url = "https://www.xiaohongshu.com/discovery/item/abcdef1234567890?xsec_token=secret"
+        with httpx.Client(base_url=self.base, timeout=5) as client:
+            response = client.post("/api/import", json={"text": share_url, "transcribe": True})
+        source_id = response.json()["source_ids"][0]
+        self.assertEqual(self.server.state.worker.source_url(source_id), share_url)
+
+    def test_second_server_cannot_reuse_the_same_port(self):
+        second = make_server(Path(self.temp.name), self.server.server_address[1])
+        try:
+            self.assertNotEqual(second.server_address[1], self.server.server_address[1])
+        finally:
+            second.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()

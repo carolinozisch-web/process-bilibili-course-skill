@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import tempfile
 import unittest
@@ -69,6 +70,28 @@ class PipelineTests(unittest.TestCase):
     def test_xiaohongshu_json_ld_is_parsed(self):
         source = '<script type="application/ld+json">{"@type":"VideoObject","name":"示例","duration":"00:42"}</script>'
         self.assertEqual(list(pipeline.iter_json_ld(source))[0]["name"], "示例")
+
+    def test_alternate_xiaohongshu_fetch_uses_stdin_and_memory_only(self):
+        url = "https://www.xiaohongshu.com/discovery/item/abc?xsec_token=secret"
+        data = {
+            "canonical_url": "https://www.xiaohongshu.com/discovery/item/abc",
+            "pages": [{"media_url": "https://sns-video-hw.xhscdn.com/example"}],
+        }
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"source_id": "abc", "data": data}),
+            stderr="",
+        )
+        with patch.dict(os.environ, {"PYTHONPATH": "transcription-runtime"}):
+            with patch("subprocess.run", return_value=completed) as run:
+                source_id, parsed = pipeline.fetch_xiaohongshu_external(url, "alternate-python")
+        self.assertEqual(source_id, "abc")
+        self.assertEqual(parsed, data)
+        self.assertEqual(run.call_args.kwargs["input"], url)
+        self.assertNotIn("secret", " ".join(run.call_args.args[0]))
+        self.assertNotIn("XHS_FETCH_PYTHON", run.call_args.kwargs["env"])
+        self.assertNotIn("PYTHONPATH", run.call_args.kwargs["env"])
+        self.assertEqual(run.call_args.kwargs["env"]["PYTHONIOENCODING"], "utf-8")
 
     def test_safe_name_removes_windows_invalid_characters(self):
         self.assertEqual(pipeline.safe_name('Course: A/B?*'), "Course- A-B")

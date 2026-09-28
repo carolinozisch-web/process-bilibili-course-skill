@@ -178,12 +178,48 @@ def decode_json_string(value: str) -> str:
         return value.replace(r"\u002F", "/").replace(r"\/", "/")
 
 
-def fetch_xiaohongshu_view(url: str):
-    httpx = load_httpx()
-    headers = {
+def xiaohongshu_headers() -> dict[str, str]:
+    return {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/138 Safari/537.36",
         "Referer": "https://www.xiaohongshu.com/",
     }
+
+
+def fetch_xiaohongshu_external(url: str, python_executable: str) -> tuple[str, dict]:
+    env = os.environ.copy()
+    env.pop("XHS_FETCH_PYTHON", None)
+    env.pop("PYTHONPATH", None)
+    env["PYTHONIOENCODING"] = "utf-8"
+    completed = subprocess.run(
+        [python_executable, str(Path(__file__).resolve()), "xhs-metadata"],
+        input=url,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+    )
+    if completed.returncode != 0:
+        detail = next((line for line in reversed(completed.stderr.splitlines()) if line.strip()), "unknown error")
+        raise SystemExit(f"ERROR: alternate Xiaohongshu page fetch failed: {detail}")
+    try:
+        payload = json.loads(completed.stdout)
+        source_id, data = str(payload["source_id"]), payload["data"]
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise SystemExit("ERROR: alternate Xiaohongshu page fetch returned invalid metadata") from exc
+    return source_id, data
+
+
+def fetch_xiaohongshu_view(url: str):
+    httpx = load_httpx()
+    headers = xiaohongshu_headers()
+    alternate_python = os.environ.get("XHS_FETCH_PYTHON", "").strip()
+    if alternate_python and Path(alternate_python).resolve() != Path(sys.executable).resolve():
+        source_id, data = fetch_xiaohongshu_external(url, alternate_python)
+        client = httpx.Client(headers=headers, follow_redirects=True, timeout=120)
+        client.headers["Referer"] = data["canonical_url"]
+        return client, source_id, data
     client = httpx.Client(headers=headers, follow_redirects=True, timeout=120)
     response = client.get(url)
     response.raise_for_status()
@@ -535,8 +571,8 @@ def run_pipeline(
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser()
-    result.add_argument("command", choices=("inspect", "run"))
-    result.add_argument("--url", required=True)
+    result.add_argument("command", choices=("inspect", "run", "xhs-metadata"))
+    result.add_argument("--url")
     result.add_argument("--workspace", default=default_workspace())
     result.add_argument("--course-name")
     result.add_argument("--start", type=int)
@@ -554,7 +590,20 @@ def parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = parser().parse_args()
-    input_url = extract_input_url(args.url)
+    if args.command == "xhs-metadata":
+        input_url = sys.stdin.read().strip()
+        if not input_url:
+            raise SystemExit("ERROR: Xiaohongshu URL missing from stdin")
+        client, source_id, data = fetch_xiaohongshu_view(input_url)
+        try:
+            print(json.dumps({"source_id": source_id, "data": data}, ensure_ascii=False))
+        finally:
+            client.close()
+        return
+    if not args.url:
+        raise SystemExit("ERROR: --url is required")
+    input_value = sys.stdin.read().strip() if args.url == "-" else args.url
+    input_url = extract_input_url(input_value)
     source_url = input_url
     resolved_url = resolve_source_url(input_url)
     platform = detect_platform(resolved_url)

@@ -4,6 +4,7 @@
 
 - For Bilibili, try the public metadata and playurl APIs first. Resolve `b23.tv` before metadata inspection; the bundled pipeline does this automatically.
 - For Xiaohongshu, resolve `xhslink.com`, validate that the final host is `xiaohongshu.com`, and accept only a public video CDN URL exposed by the page. Store the canonical item URL without share-token query parameters.
+- If one Python runtime is redirected to login while another can read the same public page, set `XHS_FETCH_PYTHON` to the working interpreter. The main process passes the share URL through stdin and keeps the returned signed media URL in memory only.
 - Treat a missing public Xiaohongshu video URL as an image-only, deleted, expired, login-gated, or anti-bot case. Stop instead of guessing or scraping private endpoints.
 - Do not extract browser Cookies or bypass login, membership, payment, region, or DRM controls. Ask the user for a public link or a local media file they are authorized to process.
 - Do not paste, print, or store signed CDN URLs, share tokens, Cookies, or other credentials in notes or manifests.

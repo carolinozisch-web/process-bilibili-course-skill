@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import httpx
 
@@ -15,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "process-bilibili-course" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from favorite_pipeline import curate_source, make_basic_triage, review_source  # noqa: E402
+from favorite_pipeline import curate_source, import_text, make_basic_triage, review_source, transcribe_source  # noqa: E402
 from knowledge_db import (  # noqa: E402
     add_topic, add_triage, add_unit, connect, create_job, get_job, knowledge_tree,
     link_topic_unit, link_unit_source, list_jobs, requeue_interrupted_jobs, retry_job, review_queue, search,
@@ -75,6 +77,41 @@ class KnowledgeLayerTests(unittest.TestCase):
         update_job(self.db, first, status="failed", error="network")
         retry_job(self.db, first)
         self.assertEqual(list_jobs(self.db)[0]["status"], "queued")
+
+    def test_xiaohongshu_share_token_is_memory_only(self):
+        captured = {}
+        result = import_text(
+            self.db,
+            "https://www.xiaohongshu.com/discovery/item/6a897e21000000003300c059?xsec_token=secret-share-token&xsec_source=pc_share",
+            transcribe=True,
+            source_url_sink=lambda source_id, url: captured.update({source_id: url}),
+        )
+        source_id = result["source_ids"][0]
+        stored = self.db.execute(
+            "SELECT canonical_url FROM source_items WHERE id=?", (source_id,)
+        ).fetchone()[0]
+        payload = self.db.execute(
+            "SELECT payload FROM processing_jobs WHERE source_item_id=?", (source_id,)
+        ).fetchone()[0]
+        self.assertEqual(
+            stored,
+            "https://www.xiaohongshu.com/discovery/item/6a897e21000000003300c059",
+        )
+        self.assertIn("secret-share-token", captured[source_id])
+        self.assertNotIn("secret-share-token", stored + payload)
+
+    def test_transcription_passes_share_url_through_stdin(self):
+        source_id = upsert_source(self.db, {
+            "platform": "xiaohongshu",
+            "canonical_url": "https://www.xiaohongshu.com/discovery/item/abc",
+        })
+        share_url = "https://www.xiaohongshu.com/discovery/item/abc?xsec_token=secret"
+        with patch("favorite_pipeline.subprocess.run", return_value=SimpleNamespace(returncode=1, stdout="failed")) as run:
+            with self.assertRaises(RuntimeError):
+                transcribe_source(self.db, self.root, source_id, source_url=share_url)
+        self.assertEqual(run.call_args.kwargs["input"], share_url)
+        self.assertNotIn("secret", " ".join(run.call_args.args[0]))
+        self.assertEqual(run.call_args.kwargs["env"]["PYTHONIOENCODING"], "utf-8")
 
     def test_basic_triage_samples_full_transcript(self):
         text = "开头先定义问题。" + "中间步骤需要拆分。" * 20 + "最后必须检查结果。"

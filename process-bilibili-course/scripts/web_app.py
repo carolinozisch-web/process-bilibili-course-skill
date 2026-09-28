@@ -74,7 +74,7 @@ class AppState:
 
 class AppServer(ThreadingHTTPServer):
     daemon_threads = True
-    allow_reuse_address = True
+    allow_reuse_address = False
 
     def __init__(self, address, handler, state: AppState):
         self.state = state
@@ -244,7 +244,11 @@ class Handler(BaseHTTPRequestHandler):
         db = connect(state.db_path)
         try:
             if method == "POST" and path == "/api/import":
-                result = import_text(db, str(body.get("text", "")), transcribe=bool(body.get("transcribe", True)))
+                result = import_text(
+                    db, str(body.get("text", "")),
+                    transcribe=bool(body.get("transcribe", True)),
+                    source_url_sink=state.worker.register_source_url,
+                )
                 self._json(result, HTTPStatus.CREATED)
             elif method == "POST" and (match := re.fullmatch(r"/api/items/(\d+)/transcribe", path)):
                 source_id = int(match.group(1))

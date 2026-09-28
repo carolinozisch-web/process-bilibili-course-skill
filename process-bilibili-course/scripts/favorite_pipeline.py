@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import re
 import subprocess
 import sys
@@ -25,6 +26,7 @@ from llm_client import OpenAICompatibleClient, compact_summary, curate_with_ai, 
 
 
 Progress = Callable[[str, int, str], None]
+SourceUrlSink = Callable[[int, str], None]
 
 
 def platform_for(url: str) -> str:
@@ -52,8 +54,17 @@ def item_id(url: str) -> str:
 
 
 def extract_urls(text: str) -> list[str]:
-    urls = re.findall(r"https?://[^\s<>]+", text)
-    return list(dict.fromkeys(canonicalize(url) for url in urls))
+    return [canonical for _, canonical in extract_url_pairs(text)]
+
+
+def extract_url_pairs(text: str) -> list[tuple[str, str]]:
+    pairs, seen = [], set()
+    for original in re.findall(r"https?://[^\s<>]+", text):
+        canonical = canonicalize(original)
+        if canonical not in seen:
+            seen.add(canonical)
+            pairs.append((original.rstrip(".,;!?）)】"), canonical))
+    return pairs
 
 
 def read_inputs(urls: list[str], input_path: str | None) -> list[dict]:
@@ -120,12 +131,13 @@ def make_basic_triage(text: str, timestamped: str = "", title: str = "") -> dict
     }
 
 
-def import_text(db, text: str, *, saved_at: str | None = None, transcribe: bool = False) -> dict:
-    urls = extract_urls(text)
-    if not urls:
+def import_text(db, text: str, *, saved_at: str | None = None, transcribe: bool = False,
+                source_url_sink: SourceUrlSink | None = None) -> dict:
+    pairs = extract_url_pairs(text)
+    if not pairs:
         raise ValueError("没有找到可导入的视频链接")
     source_ids, job_ids = [], []
-    for url in urls:
+    for original_url, url in pairs:
         platform = platform_for(url)
         if platform == "unknown":
             raise ValueError(f"暂不支持这个公开视频平台：{url}")
@@ -137,11 +149,14 @@ def import_text(db, text: str, *, saved_at: str | None = None, transcribe: bool 
         if transcribe:
             source = get_source(db, source_id)
             if not transcript_text(source, Path(".")):
+                if source_url_sink and original_url != url:
+                    source_url_sink(source_id, original_url)
                 job_ids.append(create_job(db, source_id, "transcribe"))
     return {"source_ids": source_ids, "job_ids": job_ids}
 
 
-def transcribe_source(db, workspace: Path, source_id: int, progress: Progress | None = None) -> None:
+def transcribe_source(db, workspace: Path, source_id: int, progress: Progress | None = None,
+                      source_url: str | None = None) -> None:
     source = get_source(db, source_id)
     if not source:
         raise ValueError(f"source not found: {source_id}")
@@ -151,21 +166,25 @@ def transcribe_source(db, workspace: Path, source_id: int, progress: Progress | 
     progress("download", 10, "正在读取公开视频信息并下载音频")
     course_name = f"收藏-{source_id}"
     script = Path(__file__).with_name("video_pipeline.py")
+    input_url = source_url or source["canonical_url"]
     command = [
-        sys.executable, str(script), "run", "--url", source["canonical_url"],
+        sys.executable, str(script), "run", "--url", "-",
         "--workspace", str(workspace), "--course-name", course_name,
     ]
     page_match = re.search(r"[?&]p=(\d+)", source["canonical_url"])
     if source["platform"] == "bilibili" and page_match:
         command.extend(["--start", page_match.group(1), "--end", page_match.group(1)])
     progress("transcribe", 35, "正在本地转写，较长视频需要一些时间")
+    child_env = dict(os.environ, PYTHONIOENCODING="utf-8")
     completed = subprocess.run(
-        command, cwd=str(workspace), text=True, encoding="utf-8", errors="replace",
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        command, input=input_url, cwd=str(workspace), text=True, encoding="utf-8", errors="replace",
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=child_env,
     )
     if completed.returncode:
         lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
         detail = " | ".join(lines[-3:])[:700]
+        if source["platform"] == "xiaohongshu" and not source_url:
+            detail += "；当前进程没有完整分享参数，请重新粘贴原分享链接"
         raise RuntimeError(f"公开视频处理失败（退出码 {completed.returncode}）：{detail}")
     manifest_path = workspace / "后台处理文件" / course_name / "course-manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
@@ -293,7 +312,8 @@ def curate_source(db, workspace: Path, source_id: int,
 
 
 def process_job(db_path: Path, workspace: Path, job: dict,
-                client: OpenAICompatibleClient | None = None) -> None:
+                client: OpenAICompatibleClient | None = None,
+                source_url: str | None = None) -> None:
     db = connect(db_path)
     job_id, source_id, job_type = job["id"], job["source_item_id"], job["job_type"]
 
@@ -302,7 +322,7 @@ def process_job(db_path: Path, workspace: Path, job: dict,
 
     try:
         if job_type == "transcribe":
-            transcribe_source(db, workspace, source_id, progress)
+            transcribe_source(db, workspace, source_id, progress, source_url)
             triage_source(db, workspace, source_id, client, progress)
         elif job_type == "triage":
             triage_source(db, workspace, source_id, client, progress)
@@ -326,6 +346,8 @@ class JobWorker:
         self.db_path = db_path
         self.workspace = workspace
         self.client_getter = client_getter
+        self.source_urls: dict[int, str] = {}
+        self.source_urls_lock = threading.Lock()
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self._run, name="saved-video-worker", daemon=True)
 
@@ -338,13 +360,24 @@ class JobWorker:
     def stop(self) -> None:
         self.stop_event.set()
 
+    def register_source_url(self, source_id: int, url: str) -> None:
+        with self.source_urls_lock:
+            self.source_urls[source_id] = url
+
+    def source_url(self, source_id: int) -> str | None:
+        with self.source_urls_lock:
+            return self.source_urls.get(source_id)
+
     def _run(self) -> None:
         while not self.stop_event.is_set():
             db = connect(self.db_path)
             job = next_job(db)
             db.close()
             if job:
-                process_job(self.db_path, self.workspace, job, self.client_getter())
+                process_job(
+                    self.db_path, self.workspace, job, self.client_getter(),
+                    self.source_url(job["source_item_id"]),
+                )
             else:
                 self.stop_event.wait(1)
 

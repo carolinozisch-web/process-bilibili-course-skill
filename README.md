@@ -174,6 +174,7 @@ python process-bilibili-course/scripts/video_pipeline.py run `
 | `--model` / `FASTER_WHISPER_MODEL` | Whisper 模型 | `small` |
 | `--device` / `FASTER_WHISPER_DEVICE` | `cpu`、`cuda` 等 | `cpu` |
 | `--compute-type` / `FASTER_WHISPER_COMPUTE_TYPE` | 推理精度 | `int8` |
+| `XHS_FETCH_PYTHON` | 可选：当当前 Python 被小红书重定向到登录页时，用另一 Python 仅读取公开页面信息 | 未设置 |
 | `--start`、`--end` | 只处理指定分集范围 | 全部 |
 | `--language` | `auto`、`zh` 或 `en` | `auto` |
 
