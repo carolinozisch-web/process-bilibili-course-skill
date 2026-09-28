@@ -23,7 +23,7 @@ from favorite_pipeline import (  # noqa: E402
 from knowledge_db import (  # noqa: E402
     add_topic, add_triage, add_unit, connect, create_job, get_job, knowledge_tree,
     link_topic_unit, link_unit_source, list_jobs, requeue_interrupted_jobs, retry_job, review_queue, search,
-    set_status, source_detail, update_job, upsert_source,
+    set_status, source_detail, update_job, update_triage_questions, upsert_source,
 )
 from llm_client import LLMSettings, OpenAICompatibleClient, triage_with_ai  # noqa: E402
 
@@ -127,7 +127,30 @@ class KnowledgeLayerTests(unittest.TestCase):
             ["00:00:12", "00:01:20", "00:02:10"],
         )
         self.assertNotIn("下一期", "".join(data[f"point_{index}"] for index in range(1, 4)))
+        self.assertEqual(data["key_questions"][0]["question"], "怎么寻找和管理投递岗位？")
+        self.assertEqual(data["key_questions"][0]["evidence"][0]["time"], "00:00:12")
         self.assertEqual(data["ai_mode"], "basic")
+
+    def test_questions_are_saved_edited_and_searchable(self):
+        source_id = self.source()
+        add_triage(self.db, source_id, {
+            "summary_50": "①如何准备群面；②准备什么故事；③如何阶段总结",
+            "key_questions": [{
+                "question": "群面应该如何准备？",
+                "answer": "不必抢主导，但要主动总结讨论进展并提炼框架。",
+                "evidence": [{"time": "01:34", "excerpt": "主动做阶段总结，提炼框架思路。"}],
+            }],
+        })
+        detail = source_detail(self.db, source_id)
+        self.assertEqual(detail["key_questions"][0]["question"], "群面应该如何准备？")
+        self.assertIn("t=94", detail["key_questions"][0]["evidence"][0]["source_url_at"])
+        self.assertEqual(search(self.db, "群面怎么准备", 5)[0]["id"], source_id)
+        updated = update_triage_questions(self.db, source_id, [{
+            "question": "群面需要抢主导吗？",
+            "answer": "不需要，重点是推进讨论并完成阶段总结。",
+            "evidence": [{"time": "01:34", "excerpt": "主动做阶段总结。"}],
+        }])
+        self.assertEqual(updated["key_questions"][0]["question"], "群面需要抢主导吗？")
 
     def test_duplicate_candidates_require_strong_title_similarity(self):
         source = {
@@ -229,10 +252,10 @@ class KnowledgeLayerTests(unittest.TestCase):
         def responder(request: httpx.Request) -> httpx.Response:
             self.assertNotIn(b"secret-key", request.content)
             content = json.dumps({
-                "points": [
-                    {"text": "先定义问题", "time": "00:10"},
-                    {"text": "拆分执行步骤", "time": "00:40"},
-                    {"text": "复核最终结果", "time": "01:20"},
+                "questions": [
+                    {"question": "第一步应该做什么？", "answer": "先定义问题。", "evidence": [{"time": "00:10", "excerpt": "定义问题"}]},
+                    {"question": "执行时怎么拆分？", "answer": "把工作拆分为具体步骤。", "evidence": [{"time": "00:40", "excerpt": "拆分步骤"}]},
+                    {"question": "最后如何确认结果？", "answer": "完成后复核最终结果。", "evidence": [{"time": "01:20", "excerpt": "复核结果"}]},
                 ],
                 "keywords": ["执行", "复核"], "topics": ["方法"],
             }, ensure_ascii=False)
@@ -244,6 +267,7 @@ class KnowledgeLayerTests(unittest.TestCase):
         self.assertLessEqual(len(data["summary_50"]), 50)
         self.assertEqual(data["ai_mode"], "ai")
         self.assertEqual(data["evidence"][0]["time"], "00:10")
+        self.assertEqual(data["key_questions"][0]["question"], "第一步应该做什么？")
 
 
 class MigrationTests(unittest.TestCase):
@@ -276,7 +300,7 @@ class MigrationTests(unittest.TestCase):
             upgraded = connect(path)
             row = upgraded.execute("SELECT status, reviewed_at, review_decision FROM source_items").fetchone()
             self.assertEqual(tuple(row), ("legacy_imported", None, "legacy_migration"))
-            self.assertEqual(upgraded.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0], "3")
+            self.assertEqual(upgraded.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0], "4")
             upgraded.close()
             self.assertEqual(len(list((path.parent / "backups").glob("*.db"))), 1)
 

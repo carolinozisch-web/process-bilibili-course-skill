@@ -151,34 +151,38 @@ def triage_with_ai(client: OpenAICompatibleClient, transcript: str, title: str =
         result = client.complete_json(system, f"""
 视频标题：{title}
 这是逐字稿第 {index}/{len(chunks)} 段。请输出：
-{{"points":[{{"text":"不超过18字的具体观点或方法","time":"原文时间，如00:42；没有则空"}}],
+{{"questions":[{{"question":"用户会问的具体问题","answer":"60到160字、可直接使用的回答",
+"evidence":[{{"time":"原文时间，如00:42","excerpt":"支持答案的原文，不超过70字"}}]}}],
   "keywords":["关键词"],"topics":["主题"]}}
-最多提取 3 个互不重复、能由原文支持的要点。
+最多提取 3 个互不重复的问题。每个答案必须有至少一条原文证据；忽略开场宣传、关注引导和结尾预告。
 
 逐字稿：
 {chunk}
 """)
-        candidates.extend(result.get("points", []))
+        candidates.extend(result.get("questions", result.get("points", [])))
     if len(chunks) > 1:
         reduced = client.complete_json(system, f"""
-从以下候选中选出最能代表整段视频且互不重复的 3 点。只输出
-{{"points":[{{"text":"不超过18字","time":"证据时间"}}],"keywords":[],"topics":[]}}。
+从以下候选中合成为最多 3 个最能代表整段视频的问题。每个问题必须有完整、可直接使用的答案，
+并保留一至两条原文证据。只输出
+{{"questions":[{{"question":"具体问题","answer":"60到160字的回答","evidence":[{{"time":"证据时间","excerpt":"原文"}}]}}],"keywords":[],"topics":[]}}。
 候选：{json.dumps(candidates, ensure_ascii=False)}
 """)
-        candidates = reduced.get("points", candidates)
+        candidates = reduced.get("questions", reduced.get("points", candidates))
         keywords = reduced.get("keywords", [])
         topics = reduced.get("topics", [])
     else:
         keywords = result.get("keywords", []) if chunks else []
         topics = result.get("topics", []) if chunks else []
-    summary, points = compact_summary(candidates)
-    evidence = []
-    for index, candidate in enumerate(candidates[:3]):
-        if isinstance(candidate, dict):
-            evidence.append({"point": points[index], "time": str(candidate.get("time", ""))})
+    questions = _normalize_triage_questions(candidates)
+    summary, points = compact_summary([question["question"] for question in questions])
+    evidence = [
+        {"question_index": index, "point": question["question"], **row}
+        for index, question in enumerate(questions, 1) for row in question["evidence"]
+    ]
     return {
         "summary_50": summary,
         "point_1": points[0], "point_2": points[1], "point_3": points[2],
+        "key_questions": questions,
         "keywords": list(dict.fromkeys(keywords))[:12],
         "topic_candidates": list(dict.fromkeys(topics))[:6],
         "source_signals": ["full_transcript", "ai"],
@@ -186,6 +190,34 @@ def triage_with_ai(client: OpenAICompatibleClient, transcript: str, title: str =
         "usable_content_start": evidence[0].get("time") if evidence else None,
         "evidence": evidence, "ai_mode": "ai",
     }
+
+
+def _normalize_triage_questions(values: object) -> list[dict]:
+    if not isinstance(values, list):
+        return []
+    questions = []
+    for item in values[:3]:
+        if not isinstance(item, dict):
+            continue
+        text = _point_text(item)
+        question = re.sub(r"\s+", " ", str(item.get("question", "")).strip())[:80]
+        answer = re.sub(r"\s+", " ", str(item.get("answer", text)).strip())[:360]
+        evidence = []
+        rows = item.get("evidence", [])
+        if not isinstance(rows, list) and item.get("time"):
+            rows = [{"time": item.get("time"), "excerpt": text}]
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            time = str(row.get("time", "")).strip()[:20]
+            excerpt = re.sub(r"\s+", " ", str(row.get("excerpt", "")).strip())[:220]
+            if time or excerpt:
+                evidence.append({"time": time, "excerpt": excerpt})
+        if not question and text:
+            question = "这条内容的关键做法是什么？"
+        if question and answer:
+            questions.append({"question": question, "answer": answer, "evidence": evidence[:3]})
+    return questions
 
 
 def curate_with_ai(client: OpenAICompatibleClient, transcript: str, title: str = "") -> list[dict]:

@@ -13,7 +13,7 @@ from typing import Iterable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 SOURCE_STATUSES = {
     "discovered", "transcribed", "triage_ready", "approved", "deferred",
     "rejected", "curated", "legacy_imported", "error",
@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS triage (
     new_points TEXT NOT NULL DEFAULT '[]',
     usable_content_start TEXT,
     evidence_json TEXT NOT NULL DEFAULT '[]',
+    key_questions_json TEXT NOT NULL DEFAULT '[]',
     ai_mode TEXT NOT NULL DEFAULT 'basic',
     created_at TEXT NOT NULL
 );
@@ -134,11 +135,14 @@ CREATE VIRTUAL TABLE IF NOT EXISTS unit_fts USING fts5(
     knowledge_unit_id UNINDEXED, title, when_to_use, steps, constraints,
     common_questions, common_symptoms, keywords, topic_tags
 );
+CREATE VIRTUAL TABLE IF NOT EXISTS triage_fts USING fts5(
+    source_item_id UNINDEXED, question_text, answer_text
+);
 """
 
 JSON_FIELDS = {
     "keywords", "topic_candidates", "source_signals", "possible_duplicates",
-    "new_points", "evidence_json", "steps", "constraints", "common_questions",
+    "new_points", "evidence_json", "key_questions_json", "steps", "constraints", "common_questions",
     "common_symptoms", "topic_tags", "payload", "returned_unit_ids",
 }
 
@@ -190,6 +194,7 @@ def _ensure_column(db: sqlite3.Connection, table: str, definition: str) -> None:
 
 def _migrate(db: sqlite3.Connection) -> None:
     _ensure_column(db, "triage", "evidence_json TEXT NOT NULL DEFAULT '[]'")
+    _ensure_column(db, "triage", "key_questions_json TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(db, "triage", "ai_mode TEXT NOT NULL DEFAULT 'basic'")
     db.execute("""
         UPDATE source_items
@@ -297,7 +302,7 @@ def source_detail(db: sqlite3.Connection, source_id: int) -> dict | None:
     source = _decoded(db.execute("""
         SELECT s.*, t.summary_50, t.point_1, t.point_2, t.point_3, t.keywords,
                t.topic_candidates, t.source_signals, t.possible_duplicates,
-               t.new_points, t.usable_content_start, t.evidence_json, t.ai_mode
+               t.new_points, t.usable_content_start, t.evidence_json, t.key_questions_json, t.ai_mode
         FROM source_items s LEFT JOIN triage t ON t.source_item_id=s.id
         WHERE s.id=?
     """, (source_id,)).fetchone())
@@ -306,6 +311,12 @@ def source_detail(db: sqlite3.Connection, source_id: int) -> dict | None:
     source["source_url_at"] = _source_url_at(
         source.get("canonical_url", ""), source.get("usable_content_start")
     )
+    source["key_questions"] = source.get("key_questions_json") or []
+    for question in source["key_questions"]:
+        for evidence in question.get("evidence", []):
+            evidence["source_url_at"] = _source_url_at(
+                source.get("canonical_url", ""), evidence.get("time")
+            )
     source["units"] = [_decoded(row) for row in db.execute("""
         SELECT u.*, us.segment_start, us.segment_end, us.contribution_type
         FROM unit_sources us JOIN knowledge_units u ON u.id=us.knowledge_unit_id
@@ -338,30 +349,105 @@ def add_triage(db: sqlite3.Connection, source_id: int, data: dict) -> None:
         raise ValueError("summary_50 must be at most 50 characters")
     if not all(marker in summary for marker in ("①", "②", "③")):
         raise ValueError("summary_50 must contain ①, ② and ③")
+    questions = _normalize_questions(data.get("key_questions", []))
+    if questions:
+        summary, points, evidence = _legacy_triage_fields(questions)
+    else:
+        points = [data.get("point_1", ""), data.get("point_2", ""), data.get("point_3", "")]
+        evidence = data.get("evidence", [])
     db.execute("""
         INSERT INTO triage(source_item_id, summary_50, point_1, point_2, point_3, keywords,
             topic_candidates, source_signals, possible_duplicates, new_points, usable_content_start,
-            evidence_json, ai_mode, created_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            evidence_json, key_questions_json, ai_mode, created_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(source_item_id) DO UPDATE SET
             summary_50=excluded.summary_50, point_1=excluded.point_1, point_2=excluded.point_2,
             point_3=excluded.point_3, keywords=excluded.keywords,
             topic_candidates=excluded.topic_candidates, source_signals=excluded.source_signals,
             possible_duplicates=excluded.possible_duplicates, new_points=excluded.new_points,
             usable_content_start=excluded.usable_content_start, evidence_json=excluded.evidence_json,
+            key_questions_json=excluded.key_questions_json,
             ai_mode=excluded.ai_mode, created_at=excluded.created_at
     """, (
-        source_id, summary, data.get("point_1", ""), data.get("point_2", ""), data.get("point_3", ""),
+        source_id, summary, points[0], points[1], points[2],
         as_json(data.get("keywords", [])), as_json(data.get("topic_candidates", [])),
         as_json(data.get("source_signals", [])), as_json(data.get("possible_duplicates", [])),
         as_json(data.get("new_points", [])), data.get("usable_content_start"),
-        as_json(data.get("evidence", [])), data.get("ai_mode", "basic"), data.get("created_at") or now_iso(),
+        as_json(evidence), as_json(questions), data.get("ai_mode", "basic"), data.get("created_at") or now_iso(),
     ))
+    _index_triage(db, source_id, questions)
     db.execute("""
         UPDATE source_items SET status='triage_ready', error_message=NULL
         WHERE id=? AND status IN ('discovered','transcribed','error')
     """, (source_id,))
     db.commit()
+
+
+def _normalize_questions(value: object) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    questions = []
+    for item in value[:3]:
+        if not isinstance(item, dict):
+            continue
+        question = re.sub(r"\s+", " ", str(item.get("question", "")).strip())[:80]
+        answer = re.sub(r"\s+", " ", str(item.get("answer", "")).strip())[:360]
+        evidence = []
+        for row in item.get("evidence", []) if isinstance(item.get("evidence"), list) else []:
+            if not isinstance(row, dict):
+                continue
+            time = str(row.get("time", "")).strip()[:20]
+            excerpt = re.sub(r"\s+", " ", str(row.get("excerpt", "")).strip())[:220]
+            if time or excerpt:
+                evidence.append({"time": time, "excerpt": excerpt})
+        if question and answer:
+            questions.append({"question": question, "answer": answer, "evidence": evidence[:3]})
+    return questions
+
+
+def _legacy_triage_fields(questions: list[dict]) -> tuple[str, list[str], list[dict]]:
+    defaults = ["未提取到独立问题", "缺少可验证答案", "建议人工查看原文"]
+    points = [question["question"] for question in questions]
+    while len(points) < 3:
+        points.append(defaults[len(points)])
+    summary = f"①{points[0][:13]}；②{points[1][:13]}；③{points[2][:13]}"[:50]
+    evidence = []
+    for index, question in enumerate(questions, 1):
+        evidence.extend({"question_index": index, "point": question["question"], **row}
+                        for row in question["evidence"])
+    return summary, points[:3], evidence
+
+
+def _index_triage(db: sqlite3.Connection, source_id: int, questions: list[dict]) -> None:
+    db.execute("DELETE FROM triage_fts WHERE source_item_id=?", (source_id,))
+    if questions:
+        db.execute("""
+            INSERT INTO triage_fts(source_item_id, question_text, answer_text) VALUES(?,?,?)
+        """, (
+            source_id,
+            " ".join(question["question"] for question in questions),
+            " ".join(question["answer"] for question in questions),
+        ))
+
+
+def update_triage_questions(db: sqlite3.Connection, source_id: int, questions: object) -> dict:
+    normalized = _normalize_questions(questions)
+    if not normalized:
+        raise ValueError("请至少保留一个包含问题和答案的问答")
+    if not db.execute("SELECT 1 FROM triage WHERE source_item_id=?", (source_id,)).fetchone():
+        raise ValueError("这条收藏尚未生成审核内容")
+    summary, points, evidence = _legacy_triage_fields(normalized)
+    db.execute("""
+        UPDATE triage SET summary_50=?, point_1=?, point_2=?, point_3=?, evidence_json=?,
+            key_questions_json=?, usable_content_start=?, created_at=? WHERE source_item_id=?
+    """, (
+        summary, points[0], points[1], points[2], as_json(evidence), as_json(normalized),
+        next((row["time"] for question in normalized for row in question["evidence"] if row["time"]), None),
+        now_iso(), source_id,
+    ))
+    _index_triage(db, source_id, normalized)
+    db.commit()
+    return source_detail(db, source_id) or {}
 
 
 def review_queue(db: sqlite3.Connection, now: str | None = None, limit: int = 100) -> dict[str, list[dict]]:
@@ -628,6 +714,13 @@ def search(db: sqlite3.Connection, query: str, limit: int = 20) -> list[dict]:
                 WHERE unit_fts MATCH ? AND u.status IN ('approved','curated') ORDER BY score LIMIT ?
             """),
             ("source", """
+                SELECT s.id, bm25(triage_fts) AS score FROM triage_fts
+                JOIN source_items s ON s.id=triage_fts.source_item_id
+                WHERE triage_fts MATCH ? AND s.status IN
+                    ('approved','curated','triage_ready','transcribed','legacy_imported')
+                ORDER BY score LIMIT ?
+            """),
+            ("source", """
                 SELECT s.id, bm25(source_fts) AS score FROM source_fts
                 JOIN source_items s ON s.id=source_fts.source_item_id
                 WHERE source_fts MATCH ? AND s.status IN
@@ -658,10 +751,12 @@ def search(db: sqlite3.Connection, query: str, limit: int = 20) -> list[dict]:
         )
         fallback.extend(
             ("source", row[0]) for row in db.execute("""
-                SELECT s.id FROM source_items s LEFT JOIN source_fts f ON f.source_item_id=s.id
+                SELECT s.id FROM source_items s
+                LEFT JOIN source_fts f ON f.source_item_id=s.id
+                LEFT JOIN triage t ON t.source_item_id=s.id
                 WHERE s.status IN ('approved','curated','triage_ready','transcribed','legacy_imported')
-                  AND (s.title LIKE ? OR f.transcript_text LIKE ?) LIMIT ?
-            """, (like, like, limit))
+                  AND (s.title LIKE ? OR f.transcript_text LIKE ? OR t.key_questions_json LIKE ?) LIMIT ?
+            """, (like, like, like, limit))
         )
     for kind, item_id in fallback:
         if (kind, item_id) in seen:
@@ -677,11 +772,16 @@ def search(db: sqlite3.Connection, query: str, limit: int = 20) -> list[dict]:
         for key in ("steps", "constraints", "common_questions", "common_symptoms", "keywords", "topic_tags"):
             values = item.get(key) or []
             body += " " + (" ".join(values) if isinstance(values, list) else str(values))
+        question_text = " ".join(
+            f"{row.get('question', '')} {row.get('answer', '')}"
+            for row in item.get("key_questions", []) if isinstance(row, dict)
+        ).lower()
         title_hits = sum(term in title for term in ranking_terms)
         body_hits = sum(term in body.lower() for term in ranking_terms)
+        question_hits = sum(term in question_text for term in ranking_terms)
         kind_boost = 1 if item.get("kind") == "knowledge_unit" else 0
         fts_score = -float(item["score"]) if item.get("score") is not None else 0.0
-        return title_hits * 4 + body_hits + kind_boost, title_hits, fts_score
+        return title_hits * 4 + question_hits * 3 + body_hits + kind_boost, title_hits, fts_score
 
     results.sort(key=literal_rank, reverse=True)
     return results[:limit]

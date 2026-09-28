@@ -63,6 +63,17 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("1. 检查残差图", answer)
         self.assertIn("注意：", answer)
 
+    def test_basic_search_answer_uses_matching_source_question(self):
+        answer = answer_from_cards([{
+            "kind": "source",
+            "key_questions": [{
+                "question": "群面应该如何准备？",
+                "answer": "主动推进讨论，并完成阶段总结。",
+                "evidence": [],
+            }],
+        }], "群面怎么准备")
+        self.assertIn("主动推进讨论", answer)
+
     def test_xiaohongshu_share_url_reaches_worker_memory(self):
         share_url = "https://www.xiaohongshu.com/discovery/item/abcdef1234567890?xsec_token=secret"
         with httpx.Client(base_url=self.base, timeout=5) as client:

@@ -16,9 +16,9 @@ from urllib.parse import parse_qs, urlparse
 
 from favorite_pipeline import JobWorker, curate_source, import_text, review_source, transcript_text
 from knowledge_db import (
-    connect, create_job, dashboard_counts, get_job, get_source, list_jobs, list_sources,
+    basic_query_terms, connect, create_job, dashboard_counts, get_job, get_source, list_jobs, list_sources,
     knowledge_tree, list_units, log_search, record_search_feedback, retry_job, review_queue, search,
-    source_detail, update_unit,
+    source_detail, update_triage_questions, update_unit,
 )
 from llm_client import (
     LLMError, LLMSettings, OpenAICompatibleClient, answer_with_ai, expand_query,
@@ -28,21 +28,40 @@ from llm_client import (
 MAX_BODY_BYTES = 1024 * 1024
 
 
-def answer_from_cards(results: list[dict]) -> str:
+def _best_question(item: dict, query: str) -> dict | None:
+    questions = item.get("key_questions") or []
+    if not questions:
+        return None
+    terms = [term.lower() for term in basic_query_terms(query)[1:]]
+    return max(
+        (question for question in questions if isinstance(question, dict)),
+        key=lambda question: sum(
+            term in f"{question.get('question', '')} {question.get('answer', '')}".lower()
+            for term in terms
+        ),
+        default=None,
+    )
+
+
+def answer_from_cards(results: list[dict], query: str = "") -> str:
+    if results:
+        question = _best_question(results[0], query)
+        if question:
+            return f"{question['question']}\n\n{question['answer']}"
     cards = [result for result in results if result.get("kind") == "knowledge_unit"]
-    if not cards:
-        return "没有直接答案"
-    card = cards[0]
-    lines = [card.get("title") or "最相关知识点"]
-    if card.get("when_to_use"):
-        lines.extend(["", f"适用场景：{card['when_to_use']}"])
-    if card.get("steps"):
-        lines.extend(["", "做法："])
-        lines.extend(f"{index}. {step}" for index, step in enumerate(card["steps"], 1))
-    if card.get("constraints"):
-        lines.extend(["", "注意："])
-        lines.extend(f"- {constraint}" for constraint in card["constraints"])
-    return "\n".join(lines)
+    if cards:
+        card = cards[0]
+        lines = [card.get("title") or "最相关知识点"]
+        if card.get("when_to_use"):
+            lines.extend(["", f"适用场景：{card['when_to_use']}"])
+        if card.get("steps"):
+            lines.extend(["", "做法："])
+            lines.extend(f"{index}. {step}" for index, step in enumerate(card["steps"], 1))
+        if card.get("constraints"):
+            lines.extend(["", "注意："])
+            lines.extend(f"- {constraint}" for constraint in card["constraints"])
+        return "\n".join(lines)
+    return "没有直接答案"
 
 
 class AppState:
@@ -220,10 +239,11 @@ class Handler(BaseHTTPRequestHandler):
                         if key not in seen:
                             seen.add(key)
                             merged.append(result)
-                merged = sorted(
-                    merged, key=lambda item: item.get("kind") != "knowledge_unit"
-                )[:20]
-                answer = answer_from_cards(merged)
+                merged = merged[:20]
+                for result in merged:
+                    if result.get("kind") == "source":
+                        result["matched_question"] = _best_question(result, query_text)
+                answer = answer_from_cards(merged, query_text)
                 if client and merged:
                     try:
                         answer = answer_with_ai(client, query_text, merged)
@@ -258,6 +278,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"job_id": create_job(db, source_id, "transcribe")}, HTTPStatus.ACCEPTED)
             elif method == "POST" and (match := re.fullmatch(r"/api/items/(\d+)/review", path)):
                 self._json(review_source(db, int(match.group(1)), str(body.get("decision", ""))))
+            elif method == "PUT" and (match := re.fullmatch(r"/api/items/(\d+)/questions", path)):
+                self._json(update_triage_questions(db, int(match.group(1)), body.get("questions")))
             elif method == "POST" and (match := re.fullmatch(r"/api/items/(\d+)/triage", path)):
                 source_id = int(match.group(1))
                 self._json({"job_id": create_job(db, source_id, "triage")}, HTTPStatus.ACCEPTED)

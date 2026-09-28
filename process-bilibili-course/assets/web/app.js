@@ -137,8 +137,41 @@ async function selectReview(sourceId) {
   renderReviewDetail(state.selectedSource);
 }
 
-function renderReviewDetail(item) {
+function legacyQuestions(item) {
   const evidence = item.evidence_json || [];
+  return [1, 2, 3].map((index) => {
+    const answer = item[`point_${index}`] || "";
+    const matched = evidence.filter((row) => row.question_index === index || row.point === answer || row.point === index);
+    return answer ? { question: `关键要点 ${index}`, answer, evidence: matched } : null;
+  }).filter(Boolean);
+}
+
+function reviewQuestions(item) {
+  return (item.key_questions || []).length ? item.key_questions : legacyQuestions(item);
+}
+
+function questionBlock(question, index) {
+  const evidence = question.evidence || [];
+  const evidenceHtml = evidence.length ? evidence.map((row) => {
+    const time = escapeHtml(row.time || "原文");
+    const link = row.source_url_at ? `<a class="evidence-time" href="${escapeHtml(row.source_url_at)}" target="_blank" rel="noreferrer">${time}</a>` : `<span class="evidence-time">${time}</span>`;
+    return `<div class="evidence-item">${link}<span>${escapeHtml(row.excerpt || "对应原文" )}</span></div>`;
+  }).join("") : '<div class="empty">暂无时间证据。</div>';
+  return `<article class="question-block"><div class="question-number">${index + 1}</div><div class="question-content"><h3>${escapeHtml(question.question)}</h3><p>${escapeHtml(question.answer)}</p><details class="question-evidence"><summary>查看原文依据（${evidence.length}）</summary><div class="evidence-list">${evidenceHtml}</div></details></div></article>`;
+}
+
+function questionEditor(item, questions) {
+  if (!questions.length) return "";
+  return `<details class="question-editor"><summary>编辑问答</summary><form id="questionForm">${questions.map((question, index) => `
+    <fieldset class="question-edit-row"><legend>问题 ${index + 1}</legend>
+      <label>问题<input data-question="${index}" value="${escapeHtml(question.question)}" maxlength="80" required></label>
+      <label>直接答案<textarea data-answer="${index}" rows="3" maxlength="360" required>${escapeHtml(question.answer)}</textarea></label>
+      <label class="question-keep"><input type="checkbox" data-keep="${index}" checked> 保留这条问答</label>
+    </fieldset>`).join("")}<div class="dialog-actions"><button class="button primary" type="submit">保存问答</button></div></form></details>`;
+}
+
+function renderReviewDetail(item) {
+  const questions = reviewQuestions(item);
   const duplicates = item.possible_duplicates || [];
   const canReview = ["triage_ready", "deferred", "legacy_imported", "approved"].includes(item.status);
   $("#reviewDetail").innerHTML = `
@@ -148,10 +181,9 @@ function renderReviewDetail(item) {
       ${canReview ? '<button class="button primary" data-decision="approve">批准</button><button class="button secondary" data-decision="defer">稍后处理</button><button class="button danger-text" data-decision="reject">拒绝</button>' : ""}
       ${item.status === "approved" ? '<button class="button primary" id="curateButton">提炼知识点</button>' : ""}
     </div>
-    <h3>三点速览 ${item.ai_mode ? `<span class="badge">${item.ai_mode === "ai" ? "AI 增强" : "基础模式"}</span>` : ""}</h3>
-    <div class="summary-box">${escapeHtml(item.summary_50 || "尚未生成速览")}</div>
-    <h3>原文证据</h3>
-    <div class="evidence-list">${evidence.length ? evidence.map((row) => `<div class="evidence-item"><span class="evidence-time">${escapeHtml(row.time || "--:--")}</span><span>${escapeHtml(row.excerpt || row.point || "")}</span></div>`).join("") : '<div class="empty">暂无时间证据。</div>'}</div>
+    <h3>这条内容回答了什么 ${item.ai_mode ? `<span class="badge">${item.ai_mode === "ai" ? "AI 增强" : "基础提取"}</span>` : ""}</h3>
+    <div class="question-list">${questions.length ? questions.map(questionBlock).join("") : '<div class="empty">尚未提取到可审核的问题。</div>'}</div>
+    ${canReview ? questionEditor(item, questions) : ""}
     <h3>可能重复</h3>${duplicates.length ? `<div class="tag-row">${duplicates.map((row) => `<span class="badge">${escapeHtml(row.title || "相似来源")}</span>`).join("")}</div>` : '<div class="empty">无疑似重复。</div>'}
     <h3>逐字稿节选</h3><div class="transcript">${escapeHtml(item.transcript_excerpt || "没有可显示的逐字稿")}</div>`;
   $$("[data-decision]").forEach((button) => button.addEventListener("click", () => reviewDecision(item.id, button.dataset.decision)));
@@ -161,6 +193,23 @@ function renderReviewDetail(item) {
     switchView("inbox");
   });
   $("#curateButton")?.addEventListener("click", () => beginCuration(item));
+  $("#questionForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const updated = questions.flatMap((question, index) => {
+      if (!form.querySelector(`[data-keep="${index}"]`).checked) return [];
+      return [{
+        question: form.querySelector(`[data-question="${index}"]`).value.trim(),
+        answer: form.querySelector(`[data-answer="${index}"]`).value.trim(),
+        evidence: question.evidence || [],
+      }];
+    });
+    try {
+      await api(`/api/items/${item.id}/questions`, { method: "PUT", body: JSON.stringify({ questions: updated }) });
+      notice("问答已更新");
+      await selectReview(item.id);
+    } catch (error) { notice(error.message, true); }
+  });
 }
 
 async function reviewDecision(sourceId, decision) {
@@ -343,7 +392,10 @@ async function runSearch(event) {
   try {
     const data = await api(`/api/search?q=${encodeURIComponent(query)}`);
     state.searchEventId = data.event_id;
-    const answerLabel = data.mode === "ai" ? "AI 综合回答" : "知识库直接答案";
+    const primaryQuestion = data.results[0]?.matched_question;
+    const answerLabel = data.mode === "ai" ? "AI 综合回答" : primaryQuestion
+      ? (data.results[0].status === "triage_ready" ? "待审核问答" : "视频问答")
+      : "知识库直接答案";
     const fallback = data.ai_error ? `\n\nAI 增强暂不可用，已退回本地知识库。` : "";
     $("#searchAnswer").innerHTML = `<span class="badge success">${answerLabel}</span><div class="answer-copy">${escapeHtml(data.answer + fallback)}</div>`;
     const cards = data.results.filter((result) => result.kind === "knowledge_unit");
@@ -357,8 +409,17 @@ async function runSearch(event) {
       }).join("");
       return `<article class="search-result method-result"><div class="result-meta"><span class="badge success">知识点 ${index + 1}</span></div><h3>${escapeHtml(result.title || "未命名知识点")}</h3><p>${escapeHtml(result.when_to_use || "")}</p>${steps}${constraints}${links ? `<details class="evidence-details"><summary>核对来源和时间点</summary><div class="source-links">${links}</div></details>` : ""}</article>`;
     }).join("");
-    const sourceHtml = sources.length ? `<details class="raw-results"><summary>查看原始视频匹配（${sources.length}）</summary><div>${sources.map((result) => `<article class="search-result source-result"><div class="result-meta"><span class="badge">原始来源</span></div><h3>${escapeHtml(result.title || "未命名来源")}</h3><p>${escapeHtml(result.summary_50 || "命中原始逐字稿")}</p><a href="${escapeHtml(result.source_url_at || result.canonical_url)}" target="_blank" rel="noreferrer">打开对应分集</a></article>`).join("")}</div></details>` : "";
-    $("#searchResults").innerHTML = cards.length ? `<h2 class="search-heading">提炼好的知识点</h2>${cardHtml}${sourceHtml}<div class="feedback"><span>这个答案有帮助吗？</span><button class="button small secondary search-feedback" data-value="helpful">有帮助</button><button class="button small secondary search-feedback" data-value="not_helpful">没有</button></div>` : `<div class="empty large">知识库中没有直接答案，可以换一个更具体的问题。</div>${sourceHtml}`;
+    const questionSources = sources.filter((result) => result.matched_question);
+    const questionHtml = questionSources.map((result) => {
+      const question = result.matched_question;
+      const evidence = (question.evidence || []).map((row) => `<div class="evidence-item"><a class="evidence-time" href="${escapeHtml(row.source_url_at || result.source_url_at || result.canonical_url)}" target="_blank" rel="noreferrer">${escapeHtml(row.time || "原文")}</a><span>${escapeHtml(row.excerpt || "对应原文")}</span></div>`).join("");
+      return `<article class="search-result method-result"><div class="result-meta"><span class="badge ${result.status === "triage_ready" ? "warning" : "success"}">${result.status === "triage_ready" ? "待审核问答" : "视频问答"}</span></div><h3>${escapeHtml(question.question)}</h3><p>${escapeHtml(question.answer)}</p>${evidence ? `<details class="evidence-details"><summary>核对原文依据</summary><div class="evidence-list">${evidence}</div></details>` : ""}</article>`;
+    }).join("");
+    const rawSources = sources.filter((result) => !result.matched_question);
+    const sourceHtml = rawSources.length ? `<details class="raw-results"><summary>查看原始视频匹配（${rawSources.length}）</summary><div>${rawSources.map((result) => `<article class="search-result source-result"><div class="result-meta"><span class="badge">原始来源</span></div><h3>${escapeHtml(result.title || "未命名来源")}</h3><p>${escapeHtml(result.summary_50 || "命中原始逐字稿")}</p><a href="${escapeHtml(result.source_url_at || result.canonical_url)}" target="_blank" rel="noreferrer">打开对应分集</a></article>`).join("")}</div></details>` : "";
+    const hasDirectAnswer = cards.length || questionSources.length;
+    const cardHeading = questionHtml ? "相关的已沉淀知识点" : "提炼好的知识点";
+    $("#searchResults").innerHTML = hasDirectAnswer ? `${questionHtml ? `<h2 class="search-heading">直接问答</h2>${questionHtml}` : ""}${cards.length ? `<h2 class="search-heading">${cardHeading}</h2>${cardHtml}` : ""}${sourceHtml}<div class="feedback"><span>这个答案有帮助吗？</span><button class="button small secondary search-feedback" data-value="helpful">有帮助</button><button class="button small secondary search-feedback" data-value="not_helpful">没有</button></div>` : `<div class="empty large">知识库中没有直接答案，可以换一个更具体的问题。</div>${sourceHtml}`;
     $$(".search-feedback").forEach((button) => button.addEventListener("click", async () => {
       await api("/api/search-feedback", { method: "POST", body: JSON.stringify({ event_id: state.searchEventId, feedback: button.dataset.value }) });
       notice("已记录反馈");

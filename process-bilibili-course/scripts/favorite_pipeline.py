@@ -153,6 +153,18 @@ def likely_duplicate(source: dict, candidate: dict) -> bool:
     )
 
 
+def _basic_question(text: str) -> str:
+    if "简历" in text:
+        return "投递简历时应该突出什么？"
+    if any(term in text for term in ("单面", "群面", "面试")):
+        return "面试应该如何准备？"
+    if any(term in text for term in ("投递", "岗位", "招聘", "秋招")):
+        return "怎么寻找和管理投递岗位？"
+    if "offer" in text.lower():
+        return "拿到 Offer 后应该如何决定？"
+    return "这条内容给出的关键做法是什么？"
+
+
 def make_basic_triage(text: str, timestamped: str = "", title: str = "") -> dict:
     clean = re.sub(r"\s+", " ", text).strip()
     timed_rows = re.findall(r"\[((?:\d{1,2}:)?\d{2}:\d{2})(?:\.\d{1,3})?\]\s*([^\n]+)", timestamped)
@@ -163,14 +175,23 @@ def make_basic_triage(text: str, timestamped: str = "", title: str = "") -> dict
     selected_rows = _select_knowledge_rows(rows, 3)
     selected = [text for _, text in selected_rows]
     summary, points = compact_summary(selected)
+    questions = [
+        {
+            "question": _basic_question(excerpt),
+            "answer": excerpt[:360],
+            "evidence": [{"time": time, "excerpt": excerpt[:120]}] if time else [],
+        }
+        for time, excerpt in selected_rows
+    ]
     evidence = [
-        {"point": points[index], "time": time, "excerpt": excerpt[:120]}
-        for index, (time, excerpt) in enumerate(selected_rows) if time
+        {"question_index": index, "point": question["question"], **row}
+        for index, question in enumerate(questions, 1) for row in question["evidence"]
     ]
     keywords = re.findall(r"[A-Za-z][A-Za-z0-9_.+#-]{1,}|[\u4e00-\u9fff]{2,6}", " ".join(selected))
     return {
         "summary_50": summary,
         "point_1": points[0], "point_2": points[1], "point_3": points[2],
+        "key_questions": questions,
         "keywords": list(dict.fromkeys(keywords))[:12],
         "topic_candidates": [title] if title else [],
         "source_signals": ["full_transcript", "basic"],
