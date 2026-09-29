@@ -23,7 +23,7 @@ from knowledge_db import (
     requeue_interrupted_jobs, retry_job, review_queue, search, set_status, source_detail,
     update_job, upsert_source,
 )
-from llm_client import OpenAICompatibleClient, compact_summary, curate_with_ai, triage_with_ai
+from llm_client import OpenAICompatibleClient, curate_with_ai, triage_with_ai
 
 
 Progress = Callable[[str, int, str], None]
@@ -142,77 +142,31 @@ def likely_duplicate(source: dict, candidate: dict) -> bool:
     )
 
 
-def _basic_question(text: str) -> str:
-    if "简历" in text:
-        return "投递简历时应该突出什么？"
-    if any(term in text for term in ("单面", "群面", "面试")):
-        return "面试应该如何准备？"
-    if any(term in text for term in ("投递", "岗位", "招聘", "秋招")):
-        return "怎么寻找和管理投递岗位？"
-    if "offer" in text.lower():
-        return "拿到 Offer 后应该如何决定？"
-    return "这条内容给出的关键做法是什么？"
-
-
-def _basic_question_only(rows: list[tuple[str, str]]) -> dict | None:
-    for time, raw in rows:
-        if "?" not in raw and "？" not in raw:
-            continue
-        question = re.split(r"[：:]", raw)[-1].strip(" ，。；;,.!?！？")[:80]
-        if question:
-            return {
-                "question": question if question.endswith(("?", "？")) else f"{question}？",
-                "answer": "",
-                "answer_status": "question_only",
-                "status_note": "原文提出了这个问题，但没有提供可验证答案",
-                "evidence": [{"time": time, "excerpt": raw[:120]}] if time else [],
-            }
-    return None
-
-
 def make_basic_triage(text: str, timestamped: str = "", title: str = "") -> dict:
     clean = re.sub(r"\s+", " ", text).strip()
     timed_rows = re.findall(r"\[((?:\d{1,2}:)?\d{2}:\d{2})(?:\.\d{1,3})?\]\s*([^\n]+)", timestamped)
-    question_rows = timed_rows or [
-        ("", part.strip()) for part in re.findall(r"[^。！？!?；;\n]+[。！？!?；;]?", clean)
-        if len(part.strip()) >= 6
-    ]
     rows = timed_rows or [
         ("", part.strip(" ，。；;,.!?！？"))
         for part in re.split(r"[。！？!?；;\n]", clean) if len(part.strip()) >= 6
     ]
     selected_rows = _select_knowledge_rows(rows, 3)
     selected = [text for _, text in selected_rows]
-    summary, points = compact_summary(selected)
-    questions = [
-        {
-            "question": _basic_question(excerpt),
-            "answer": excerpt[:360],
-            "answer_status": "answered",
-            "status_note": "",
-            "evidence": [{"time": time, "excerpt": excerpt[:120]}] if time else [],
-        }
-        for time, excerpt in selected_rows
-    ]
-    if not questions:
-        question_only = _basic_question_only(question_rows)
-        if question_only:
-            questions.append(question_only)
-            summary, points = compact_summary([question_only["question"]])
+    summary = "①仅定位原文线索；②未生成问答；③不可直接入库"
+    points = ["仅定位原文线索", "未生成问答", "不可直接入库"]
     evidence = [
-        {"question_index": index, "point": question["question"], **row}
-        for index, question in enumerate(questions, 1) for row in question["evidence"]
+        {"clue_index": index, "time": time, "excerpt": excerpt[:220]}
+        for index, (time, excerpt) in enumerate(selected_rows, 1)
     ]
     keywords = re.findall(r"[A-Za-z][A-Za-z0-9_.+#-]{1,}|[\u4e00-\u9fff]{2,6}", " ".join(selected))
     return {
         "summary_50": summary,
         "point_1": points[0], "point_2": points[1], "point_3": points[2],
-        "key_questions": questions,
+        "key_questions": [],
         "keywords": list(dict.fromkeys(keywords))[:12],
         "topic_candidates": [title] if title else [],
         "source_signals": ["full_transcript", "basic"],
         "possible_duplicates": [], "new_points": [],
-        "usable_content_start": evidence[0]["time"] if evidence else None,
+        "usable_content_start": next((row["time"] for row in evidence if row["time"]), None),
         "evidence": evidence, "ai_mode": "basic",
     }
 

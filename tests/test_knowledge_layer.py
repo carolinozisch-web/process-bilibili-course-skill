@@ -25,7 +25,7 @@ from knowledge_db import (  # noqa: E402
     link_topic_unit, link_unit_source, list_jobs, requeue_interrupted_jobs, retry_job, review_queue, search,
     set_status, source_detail, update_job, update_triage_questions, upsert_source,
 )
-from llm_client import LLMSettings, OpenAICompatibleClient, triage_with_ai  # noqa: E402
+from llm_client import LLMSettings, OpenAICompatibleClient, _normalize_triage_questions, triage_with_ai  # noqa: E402
 
 
 class KnowledgeLayerTests(unittest.TestCase):
@@ -115,27 +115,25 @@ class KnowledgeLayerTests(unittest.TestCase):
         self.assertNotIn("secret", " ".join(run.call_args.args[0]))
         self.assertEqual(run.call_args.kwargs["env"]["PYTHONIOENCODING"], "utf-8")
 
-    def test_basic_triage_samples_full_transcript(self):
+    def test_basic_triage_only_returns_timestamped_source_clues(self):
         text = "今天介绍流程。投递时记录岗位和进度。经历要用数据证明结果。面试提前准备三个故事。下一期再展开。"
         timed = ("[00:00:01.000] 今天介绍流程\n[00:00:12.300] 投递时记录岗位和进度\n"
                  "[00:01:20.500] 经历要用数据证明结果\n[00:02:10.000] 面试提前准备三个故事\n"
                  "[00:03:40.000] 下一期再展开\n")
         data = make_basic_triage(text, timed, "示例")
-        self.assertLessEqual(len(data["summary_50"]), 50)
+        self.assertEqual(data["summary_50"], "①仅定位原文线索；②未生成问答；③不可直接入库")
         self.assertEqual(
             [row["time"] for row in data["evidence"]],
             ["00:00:12", "00:01:20", "00:02:10"],
         )
-        self.assertNotIn("下一期", "".join(data[f"point_{index}"] for index in range(1, 4)))
-        self.assertEqual(data["key_questions"][0]["question"], "怎么寻找和管理投递岗位？")
-        self.assertEqual(data["key_questions"][0]["evidence"][0]["time"], "00:00:12")
-        self.assertEqual(data["key_questions"][0]["answer_status"], "answered")
+        self.assertEqual(data["point_2"], "未生成问答")
+        self.assertEqual(data["key_questions"], [])
+        self.assertEqual(data["evidence"][0]["excerpt"], "投递时记录岗位和进度")
         self.assertEqual(data["ai_mode"], "basic")
 
-    def test_basic_triage_marks_an_unanswered_question_without_faking_an_answer(self):
+    def test_basic_triage_does_not_turn_an_unanswered_question_into_qa(self):
         data = make_basic_triage("今天想聊一个问题：秋招应该怎么准备？下一期再说。")
-        self.assertEqual(data["key_questions"][0]["answer_status"], "question_only")
-        self.assertEqual(data["key_questions"][0]["answer"], "")
+        self.assertEqual(data["key_questions"], [])
 
     def test_questions_are_saved_edited_and_searchable(self):
         source_id = self.source()
@@ -172,6 +170,16 @@ class KnowledgeLayerTests(unittest.TestCase):
         self.assertEqual(question["answer"], "")
         updated = update_triage_questions(self.db, source_id, [question])
         self.assertEqual(updated["key_questions"][0]["answer_status"], "question_only")
+
+    def test_ai_triage_rejects_template_questions_and_short_answers(self):
+        questions = _normalize_triage_questions([
+            {"question": "这条内容给出的关键做法是什么？", "answer": "完整但没有价值的模板回答。",
+             "evidence": [{"time": "00:10", "excerpt": "原文"}]},
+            {"question": "面试前要完成什么？", "answer": "准备简历。",
+             "evidence": [{"time": "00:20", "excerpt": "准备简历"}]},
+        ])
+        self.assertEqual(len(questions), 1)
+        self.assertEqual(questions[0]["answer_status"], "partial")
 
     def test_duplicate_candidates_require_strong_title_similarity(self):
         source = {
@@ -274,7 +282,7 @@ class KnowledgeLayerTests(unittest.TestCase):
             self.assertNotIn(b"secret-key", request.content)
             content = json.dumps({
                 "questions": [
-                    {"question": "第一步应该做什么？", "answer_status": "answered", "answer": "先定义问题。", "evidence": [{"time": "00:10", "excerpt": "定义问题"}]},
+                    {"question": "第一步应该做什么？", "answer_status": "answered", "answer": "先定义问题的边界、目标和可用信息，再开始后续执行，避免直接跳到方案。", "evidence": [{"time": "00:10", "excerpt": "定义问题"}]},
                     {"question": "执行时怎么拆分？", "answer": "把工作拆分为具体步骤。", "evidence": [{"time": "00:40", "excerpt": "拆分步骤"}]},
                     {"question": "最后如何确认结果？", "answer": "完成后复核最终结果。", "evidence": [{"time": "01:20", "excerpt": "复核结果"}]},
                 ],

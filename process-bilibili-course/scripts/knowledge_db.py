@@ -317,6 +317,15 @@ def source_detail(db: sqlite3.Connection, source_id: int) -> dict | None:
             evidence["source_url_at"] = _source_url_at(
                 source.get("canonical_url", ""), evidence.get("time")
             )
+    source["basic_clues"] = []
+    for evidence in source.get("evidence_json") or []:
+        if not isinstance(evidence, dict) or not evidence.get("excerpt"):
+            continue
+        source["basic_clues"].append({
+            "time": evidence.get("time", ""),
+            "excerpt": evidence["excerpt"],
+            "source_url_at": _source_url_at(source.get("canonical_url", ""), evidence.get("time")),
+        })
     source["units"] = [_decoded(row) for row in db.execute("""
         SELECT u.*, us.segment_start, us.segment_end, us.contribution_type
         FROM unit_sources us JOIN knowledge_units u ON u.id=us.knowledge_unit_id

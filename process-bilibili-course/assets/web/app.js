@@ -147,7 +147,8 @@ function legacyQuestions(item) {
 }
 
 function reviewQuestions(item) {
-  return (item.key_questions || []).length ? item.key_questions : legacyQuestions(item);
+  if ((item.key_questions || []).length) return item.key_questions;
+  return item.ai_mode === "basic" ? [] : legacyQuestions(item);
 }
 
 function answerStatus(question) {
@@ -181,6 +182,14 @@ function questionBlock(item, question, index) {
   return `<article class="question-block"><div class="question-number">${index + 1}</div><div class="question-content"><div class="question-heading"><h3>${escapeHtml(question.question)}</h3>${answerStatusBadge(question)}</div>${response}<details class="question-evidence"><summary>查看原文依据（${evidence.length}）</summary><div class="evidence-list">${evidenceHtml}</div></details></div></article>`;
 }
 
+function basicClueBlock(item, clue, index) {
+  const time = escapeHtml(clue.time || "原文片段");
+  const link = item.platform === "bilibili" && clue.source_url_at
+    ? `<a class="evidence-time" href="${escapeHtml(clue.source_url_at)}" target="_blank" rel="noreferrer">${time}</a>`
+    : `<span class="evidence-time">${time}</span>`;
+  return `<article class="question-block basic-clue"><div class="question-number">${index + 1}</div><div class="question-content"><div class="question-heading"><h3>可能相关的原文片段</h3><span class="badge">基础线索</span></div><p>${link} ${escapeHtml(clue.excerpt)}</p></div></article>`;
+}
+
 function questionEditor(item, questions) {
   if (!questions.length) return "";
   return `<details class="question-editor"><summary>编辑候选问题</summary><form id="questionForm">${questions.map((question, index) => `
@@ -205,6 +214,8 @@ function curationSelection(item, questions) {
 
 function renderReviewDetail(item) {
   const questions = reviewQuestions(item);
+  const basicOnly = item.ai_mode === "basic" && !questions.length;
+  const clues = basicOnly ? item.basic_clues || [] : [];
   const duplicates = item.possible_duplicates || [];
   const canReview = ["triage_ready", "deferred", "legacy_imported", "approved"].includes(item.status);
   $("#reviewDetail").innerHTML = `
@@ -213,9 +224,10 @@ function renderReviewDetail(item) {
       ${item.status === "legacy_imported" && !item.summary_50 ? '<button class="button secondary" id="triageButton">生成速览</button>' : ""}
       ${canReview ? '<button class="button primary" data-decision="approve">批准</button><button class="button secondary" data-decision="defer">稍后处理</button><button class="button danger-text" data-decision="reject">拒绝</button>' : ""}
     </div>
-    <h3>这条内容回答了什么 ${item.ai_mode ? `<span class="badge">${item.ai_mode === "ai" ? "AI 增强" : "基础提取"}</span>` : ""}</h3>
-    <div class="question-list">${questions.length ? questions.map((question, index) => questionBlock(item, question, index)).join("") : '<div class="empty">尚未提取到可审核的问题。</div>'}</div>
-    ${canReview ? questionEditor(item, questions) : ""}
+    <h3>${basicOnly ? "基础原文线索" : "这条内容回答了什么"} ${item.ai_mode ? `<span class="badge">${item.ai_mode === "ai" ? "AI 增强" : "基础提取"}</span>` : ""}</h3>
+    ${basicOnly ? '<p class="basic-notice">当前未配置模型。基础模式只定位可能相关的原文，不生成问答，也不能直接入库。</p>' : ""}
+    <div class="question-list">${basicOnly ? (clues.length ? clues.map((clue, index) => basicClueBlock(item, clue, index)).join("") : '<div class="empty">没有定位到明显相关的原文片段。</div>') : (questions.length ? questions.map((question, index) => questionBlock(item, question, index)).join("") : '<div class="empty">尚未提取到可审核的问题。</div>')}</div>
+    ${canReview && !basicOnly ? questionEditor(item, questions) : ""}
     ${curationSelection(item, questions)}
     <h3>可能重复</h3>${duplicates.length ? `<div class="tag-row">${duplicates.map((row) => `<span class="badge">${escapeHtml(row.title || "相似来源")}</span>`).join("")}</div>` : '<div class="empty">无疑似重复。</div>'}
     <h3>逐字稿节选</h3><div class="transcript">${escapeHtml(item.transcript_excerpt || "没有可显示的逐字稿")}</div>`;

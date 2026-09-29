@@ -218,9 +218,18 @@ def _normalize_triage_questions(values: object) -> list[dict]:
                 evidence.append({"time": time, "excerpt": excerpt})
         if not question and text:
             question = "这条内容的关键做法是什么？"
+        if question in {"这条内容的关键做法是什么？", "这条内容给出的关键做法是什么？"}:
+            continue
+        supported_evidence = [row for row in evidence if row["time"] and row["excerpt"]]
         if status == "answered" and (not answer or not evidence):
             status = "partial" if answer else "question_only"
             status_note = status_note or ("答案缺少可验证的原文依据" if answer else "原文只提出了问题")
+        if status == "answered" and len(answer) < 24:
+            status = "partial"
+            status_note = "原文回答过短，不能作为完整答案"
+        if status == "answered" and not supported_evidence:
+            status = "partial"
+            status_note = "答案缺少带时间点的完整原文依据"
         elif status == "partial" and not status_note:
             status_note = "原文只提供了部分方向，不能补全为完整答案"
         elif status == "question_only":

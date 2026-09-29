@@ -103,6 +103,8 @@ tbody tr:last-child td { border-bottom: 0; }
 .question-heading { display: flex; align-items: start; justify-content: space-between; gap: 10px; }
 .question-content > p { margin: 0; line-height: 1.7; }
 .answer-limited { color: var(--muted); }
+.basic-notice { margin: 0 0 10px; color: var(--muted); line-height: 1.6; }
+.basic-clue .question-content > p { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 10px; }
 .question-evidence { margin-top: 11px; }
 .question-evidence summary, .question-editor summary { color: var(--blue); cursor: pointer; }
 .question-editor { margin: 0 0 22px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 11px 0; }
