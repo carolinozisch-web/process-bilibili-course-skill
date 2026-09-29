@@ -100,7 +100,9 @@ tbody tr:last-child td { border-bottom: 0; }
 .question-block { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 6px; background: #fcfdfc; }
 .question-number { width: 26px; height: 26px; display: grid; place-items: center; border-radius: 50%; background: var(--green-soft); color: var(--green); font-size: 12px; font-weight: 700; }
 .question-content h3 { margin: 3px 0 7px; font-size: 15px; }
+.question-heading { display: flex; align-items: start; justify-content: space-between; gap: 10px; }
 .question-content > p { margin: 0; line-height: 1.7; }
+.answer-limited { color: var(--muted); }
 .question-evidence { margin-top: 11px; }
 .question-evidence summary, .question-editor summary { color: var(--blue); cursor: pointer; }
 .question-editor { margin: 0 0 22px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 11px 0; }
@@ -110,6 +112,17 @@ tbody tr:last-child td { border-bottom: 0; }
 .question-edit-row label { display: grid; gap: 5px; font-size: 12px; }
 .question-edit-row .question-keep { display: flex; align-items: center; gap: 7px; color: var(--muted); font-weight: 500; }
 .question-keep input { width: 15px; height: 15px; }
+.candidate-status { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.candidate-status .badge { margin-right: 6px; vertical-align: middle; }
+.curation-selection { margin: 0 0 22px; padding: 15px; border: 1px solid var(--line); border-radius: 6px; background: #f7faf8; }
+.curation-selection h3 { margin: 0 0 6px; font-size: 15px; }
+.curation-selection > p { margin: 0 0 12px; color: var(--muted); line-height: 1.6; }
+.curation-options { display: grid; gap: 8px; }
+.curation-option { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 10px; padding: 11px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); cursor: pointer; }
+.curation-option input { width: 16px; height: 16px; margin-top: 2px; }
+.curation-option span { display: grid; gap: 4px; }
+.curation-option strong { font-size: 14px; }
+.curation-option small { color: var(--muted); line-height: 1.55; }
 .evidence-list { display: grid; gap: 8px; margin: 10px 0 20px; }
 .evidence-item { display: grid; grid-template-columns: 64px 1fr; gap: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 5px; }
 .evidence-time { color: var(--blue); font-variant-numeric: tabular-nums; }

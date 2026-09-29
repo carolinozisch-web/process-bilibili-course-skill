@@ -392,6 +392,10 @@ def _normalize_questions(value: object) -> list[dict]:
             continue
         question = re.sub(r"\s+", " ", str(item.get("question", "")).strip())[:80]
         answer = re.sub(r"\s+", " ", str(item.get("answer", "")).strip())[:360]
+        status = str(item.get("answer_status", "")).strip()
+        if status not in {"answered", "partial", "question_only"}:
+            status = "answered" if answer else "question_only"
+        status_note = re.sub(r"\s+", " ", str(item.get("status_note", "")).strip())[:160]
         evidence = []
         for row in item.get("evidence", []) if isinstance(item.get("evidence"), list) else []:
             if not isinstance(row, dict):
@@ -400,8 +404,21 @@ def _normalize_questions(value: object) -> list[dict]:
             excerpt = re.sub(r"\s+", " ", str(row.get("excerpt", "")).strip())[:220]
             if time or excerpt:
                 evidence.append({"time": time, "excerpt": excerpt})
-        if question and answer:
-            questions.append({"question": question, "answer": answer, "evidence": evidence[:3]})
+        if status == "answered" and (not answer or not evidence):
+            status = "partial" if answer else "question_only"
+            status_note = status_note or ("答案缺少可验证的原文依据" if answer else "原文只提出了问题")
+        elif status == "partial" and not status_note:
+            status_note = "原文只提供了部分方向，不能补全为完整答案"
+        elif status == "question_only" and not status_note:
+            status_note = "原文提出了这个问题，但没有提供可验证答案"
+        if question:
+            questions.append({
+                "question": question,
+                "answer": answer,
+                "evidence": evidence[:3],
+                "answer_status": status,
+                "status_note": status_note,
+            })
     return questions
 
 
@@ -433,7 +450,7 @@ def _index_triage(db: sqlite3.Connection, source_id: int, questions: list[dict])
 def update_triage_questions(db: sqlite3.Connection, source_id: int, questions: object) -> dict:
     normalized = _normalize_questions(questions)
     if not normalized:
-        raise ValueError("请至少保留一个包含问题和答案的问答")
+        raise ValueError("请至少保留一个问题")
     if not db.execute("SELECT 1 FROM triage WHERE source_item_id=?", (source_id,)).fetchone():
         raise ValueError("这条收藏尚未生成审核内容")
     summary, points, evidence = _legacy_triage_fields(normalized)

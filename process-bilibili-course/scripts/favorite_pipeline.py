@@ -99,22 +99,15 @@ def timestamped_text(source: dict, workspace: Path) -> str:
     return path.read_text(encoding="utf-8-sig") if path and path.exists() else ""
 
 
-def _sample_evenly(values: list[str], count: int = 3) -> list[str]:
-    unique = list(dict.fromkeys(value for value in values if value))
-    if len(unique) <= count:
-        return unique
-    positions = [round(index * (len(unique) - 1) / (count - 1)) for index in range(count)]
-    return [unique[position] for position in positions]
-
-
 def _knowledge_score(value: str) -> int:
     action_hits = len(re.findall(
         r"不要|需要|应该|建议|推荐|记得|提前|设置|记录|跟踪|使用|采用|重点|核心|策略|步骤|方法|改|准备|总结|提炼|证明",
         value,
     ))
     noise_hits = len(re.findall(r"今天|这期|下一期|收藏|关注|一定能|我说真的|别慌|很正常|不会差", value))
+    question_hits = len(re.findall(r"应该怎么|如何|什么|是否|能否|为什么", value))
     concrete = bool(re.search(r"\d|第一|第二|第三|例如|比如|包括|分为|数据|结果", value))
-    return action_hits * 3 + int(concrete) * 2 + int(10 <= len(value) <= 70) - noise_hits * 4
+    return action_hits * 3 + int(concrete) * 2 + int(10 <= len(value) <= 70) - noise_hits * 4 - question_hits * 4
 
 
 def _select_knowledge_rows(rows: list[tuple[str, str]], count: int = 3) -> list[tuple[str, str]]:
@@ -130,10 +123,6 @@ def _select_knowledge_rows(rows: list[tuple[str, str]], count: int = 3) -> list[
         selected.append((index, time, text))
         if len(selected) == count:
             break
-    if len(selected) < count:
-        remaining = [(index, time, text) for index, time, text, _ in candidates
-                     if not any(index == chosen[0] for chosen in selected)]
-        selected.extend(_sample_evenly(remaining, count - len(selected)))
     return [(time, text) for _, time, text in sorted(selected[:count])]
 
 
@@ -165,9 +154,29 @@ def _basic_question(text: str) -> str:
     return "这条内容给出的关键做法是什么？"
 
 
+def _basic_question_only(rows: list[tuple[str, str]]) -> dict | None:
+    for time, raw in rows:
+        if "?" not in raw and "？" not in raw:
+            continue
+        question = re.split(r"[：:]", raw)[-1].strip(" ，。；;,.!?！？")[:80]
+        if question:
+            return {
+                "question": question if question.endswith(("?", "？")) else f"{question}？",
+                "answer": "",
+                "answer_status": "question_only",
+                "status_note": "原文提出了这个问题，但没有提供可验证答案",
+                "evidence": [{"time": time, "excerpt": raw[:120]}] if time else [],
+            }
+    return None
+
+
 def make_basic_triage(text: str, timestamped: str = "", title: str = "") -> dict:
     clean = re.sub(r"\s+", " ", text).strip()
     timed_rows = re.findall(r"\[((?:\d{1,2}:)?\d{2}:\d{2})(?:\.\d{1,3})?\]\s*([^\n]+)", timestamped)
+    question_rows = timed_rows or [
+        ("", part.strip()) for part in re.findall(r"[^。！？!?；;\n]+[。！？!?；;]?", clean)
+        if len(part.strip()) >= 6
+    ]
     rows = timed_rows or [
         ("", part.strip(" ，。；;,.!?！？"))
         for part in re.split(r"[。！？!?；;\n]", clean) if len(part.strip()) >= 6
@@ -179,10 +188,17 @@ def make_basic_triage(text: str, timestamped: str = "", title: str = "") -> dict
         {
             "question": _basic_question(excerpt),
             "answer": excerpt[:360],
+            "answer_status": "answered",
+            "status_note": "",
             "evidence": [{"time": time, "excerpt": excerpt[:120]}] if time else [],
         }
         for time, excerpt in selected_rows
     ]
+    if not questions:
+        question_only = _basic_question_only(question_rows)
+        if question_only:
+            questions.append(question_only)
+            summary, points = compact_summary([question_only["question"]])
     evidence = [
         {"question_index": index, "point": question["question"], **row}
         for index, question in enumerate(questions, 1) for row in question["evidence"]

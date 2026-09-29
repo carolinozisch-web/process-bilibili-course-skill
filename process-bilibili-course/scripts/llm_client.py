@@ -151,10 +151,10 @@ def triage_with_ai(client: OpenAICompatibleClient, transcript: str, title: str =
         result = client.complete_json(system, f"""
 视频标题：{title}
 这是逐字稿第 {index}/{len(chunks)} 段。请输出：
-{{"questions":[{{"question":"用户会问的具体问题","answer":"60到160字、可直接使用的回答",
-"evidence":[{{"time":"原文时间，如00:42","excerpt":"支持答案的原文，不超过70字"}}]}}],
+{{"questions":[{{"question":"用户会问的具体问题","answer_status":"answered / partial / question_only","status_note":"判断说明","answer":"60到160字、可直接使用的回答；仅提出问题时留空",
+"evidence":[{{"time":"原文时间，如00:42","excerpt":"支持答案或判断的原文，不超过70字"}}]}}],
   "keywords":["关键词"],"topics":["主题"]}}
-最多提取 3 个互不重复的问题。每个答案必须有至少一条原文证据；忽略开场宣传、关注引导和结尾预告。
+最多提取 3 个互不重复的问题。answered 表示原文完整回答且至少有一条证据；partial 表示原文只回答一部分，不能自行补全；question_only 表示原文只提出问题，answer 必须留空。忽略开场宣传、关注引导和结尾预告。
 
 逐字稿：
 {chunk}
@@ -162,9 +162,8 @@ def triage_with_ai(client: OpenAICompatibleClient, transcript: str, title: str =
         candidates.extend(result.get("questions", result.get("points", [])))
     if len(chunks) > 1:
         reduced = client.complete_json(system, f"""
-从以下候选中合成为最多 3 个最能代表整段视频的问题。每个问题必须有完整、可直接使用的答案，
-并保留一至两条原文证据。只输出
-{{"questions":[{{"question":"具体问题","answer":"60到160字的回答","evidence":[{{"time":"证据时间","excerpt":"原文"}}]}}],"keywords":[],"topics":[]}}。
+从以下候选中合成为最多 3 个最能代表整段视频的问题。保留原有 answer_status：只有 answered 才能给完整、可直接使用的答案；partial 和 question_only 不得补写答案。每项保留一至两条原文证据。只输出
+{{"questions":[{{"question":"具体问题","answer_status":"answered / partial / question_only","status_note":"判断说明","answer":"60到160字的回答或留空","evidence":[{{"time":"证据时间","excerpt":"原文"}}]}}],"keywords":[],"topics":[]}}。
 候选：{json.dumps(candidates, ensure_ascii=False)}
 """)
         candidates = reduced.get("questions", reduced.get("points", candidates))
@@ -202,6 +201,10 @@ def _normalize_triage_questions(values: object) -> list[dict]:
         text = _point_text(item)
         question = re.sub(r"\s+", " ", str(item.get("question", "")).strip())[:80]
         answer = re.sub(r"\s+", " ", str(item.get("answer", text)).strip())[:360]
+        status = str(item.get("answer_status", "")).strip()
+        if status not in {"answered", "partial", "question_only"}:
+            status = "answered" if answer else "question_only"
+        status_note = re.sub(r"\s+", " ", str(item.get("status_note", "")).strip())[:160]
         evidence = []
         rows = item.get("evidence", [])
         if not isinstance(rows, list) and item.get("time"):
@@ -215,8 +218,22 @@ def _normalize_triage_questions(values: object) -> list[dict]:
                 evidence.append({"time": time, "excerpt": excerpt})
         if not question and text:
             question = "这条内容的关键做法是什么？"
-        if question and answer:
-            questions.append({"question": question, "answer": answer, "evidence": evidence[:3]})
+        if status == "answered" and (not answer or not evidence):
+            status = "partial" if answer else "question_only"
+            status_note = status_note or ("答案缺少可验证的原文依据" if answer else "原文只提出了问题")
+        elif status == "partial" and not status_note:
+            status_note = "原文只提供了部分方向，不能补全为完整答案"
+        elif status == "question_only":
+            answer = ""
+            status_note = status_note or "原文提出了这个问题，但没有提供可验证答案"
+        if question:
+            questions.append({
+                "question": question,
+                "answer": answer,
+                "evidence": evidence[:3],
+                "answer_status": status,
+                "status_note": status_note,
+            })
     return questions
 
 

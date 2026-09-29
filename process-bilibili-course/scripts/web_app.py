@@ -29,12 +29,17 @@ MAX_BODY_BYTES = 1024 * 1024
 
 
 def _best_question(item: dict, query: str) -> dict | None:
-    questions = item.get("key_questions") or []
+    questions = [
+        question for question in item.get("key_questions") or []
+        if isinstance(question, dict)
+        and question.get("answer")
+        and question.get("answer_status", "answered") == "answered"
+    ]
     if not questions:
         return None
     terms = [term.lower() for term in basic_query_terms(query)[1:]]
     return max(
-        (question for question in questions if isinstance(question, dict)),
+        questions,
         key=lambda question: sum(
             term in f"{question.get('question', '')} {question.get('answer', '')}".lower()
             for term in terms

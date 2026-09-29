@@ -150,8 +150,24 @@ function reviewQuestions(item) {
   return (item.key_questions || []).length ? item.key_questions : legacyQuestions(item);
 }
 
+function answerStatus(question) {
+  return question.answer_status || (question.answer ? "answered" : "question_only");
+}
+
+function answerStatusBadge(question) {
+  const status = answerStatus(question);
+  const labels = {
+    answered: ["可回答", "success"],
+    partial: ["部分回答", "warning"],
+    question_only: ["仅提出问题", "warning"],
+  };
+  const [label, tone] = labels[status] || labels.question_only;
+  return `<span class="badge ${tone}">${label}</span>`;
+}
+
 function questionBlock(item, question, index) {
   const evidence = question.evidence || [];
+  const status = answerStatus(question);
   const evidenceHtml = evidence.length ? evidence.map((row) => {
     const time = escapeHtml(row.time || "原文");
     const link = item.platform === "bilibili" && row.source_url_at
@@ -159,17 +175,32 @@ function questionBlock(item, question, index) {
       : `<span class="evidence-time">${time}</span>`;
     return `<div class="evidence-item">${link}<span>${escapeHtml(row.excerpt || "对应原文" )}</span></div>`;
   }).join("") : '<div class="empty">暂无时间证据。</div>';
-  return `<article class="question-block"><div class="question-number">${index + 1}</div><div class="question-content"><h3>${escapeHtml(question.question)}</h3><p>${escapeHtml(question.answer)}</p><details class="question-evidence"><summary>查看原文依据（${evidence.length}）</summary><div class="evidence-list">${evidenceHtml}</div></details></div></article>`;
+  const response = status === "answered"
+    ? `<p>${escapeHtml(question.answer)}</p>`
+    : `<p class="answer-limited">${escapeHtml(question.status_note || (status === "partial" ? "原文只提供了部分方向，不能补全为完整答案。" : "原文提出了这个问题，但没有提供可验证答案。"))}${question.answer ? `<br>${escapeHtml(question.answer)}` : ""}</p>`;
+  return `<article class="question-block"><div class="question-number">${index + 1}</div><div class="question-content"><div class="question-heading"><h3>${escapeHtml(question.question)}</h3>${answerStatusBadge(question)}</div>${response}<details class="question-evidence"><summary>查看原文依据（${evidence.length}）</summary><div class="evidence-list">${evidenceHtml}</div></details></div></article>`;
 }
 
 function questionEditor(item, questions) {
   if (!questions.length) return "";
-  return `<details class="question-editor"><summary>编辑问答</summary><form id="questionForm">${questions.map((question, index) => `
+  return `<details class="question-editor"><summary>编辑候选问题</summary><form id="questionForm">${questions.map((question, index) => `
     <fieldset class="question-edit-row"><legend>问题 ${index + 1}</legend>
       <label>问题<input data-question="${index}" value="${escapeHtml(question.question)}" maxlength="80" required></label>
-      <label>直接答案<textarea data-answer="${index}" rows="3" maxlength="360" required>${escapeHtml(question.answer)}</textarea></label>
-      <label class="question-keep"><input type="checkbox" data-keep="${index}" checked> 保留这条问答</label>
+      <label>原文回答<textarea data-answer="${index}" rows="3" maxlength="360" ${answerStatus(question) === "answered" ? "required" : ""}>${escapeHtml(question.answer)}</textarea></label>
+      <p class="candidate-status">${answerStatusBadge(question)} ${escapeHtml(question.status_note || "")}</p>
+      <label class="question-keep"><input type="checkbox" data-keep="${index}" checked> 保留这条候选内容</label>
     </fieldset>`).join("")}<div class="dialog-actions"><button class="button primary" type="submit">保存问答</button></div></form></details>`;
+}
+
+function curationSelection(item, questions) {
+  const eligible = questions.map((question, index) => ({ question, index }))
+    .filter(({ question }) => answerStatus(question) === "answered" && question.answer);
+  if (item.status !== "approved") return "";
+  if (!eligible.length) {
+    return `<section class="curation-selection"><h3>选择入库内容</h3><div class="empty">这条内容没有可验证的完整答案，因此暂不生成知识点。你可以保留原始来源，或返回审核后再处理。</div></section>`;
+  }
+  return `<section class="curation-selection"><h3>选择入库内容</h3><p>只会把勾选的“可回答”内容沉淀为知识点；其余候选会继续保留在原始来源中。</p><form id="curateQuestionForm"><div class="curation-options">${eligible.map(({ question, index }) => `
+    <label class="curation-option"><input type="checkbox" data-curate-index="${index}"><span><strong>${escapeHtml(question.question)}</strong><small>${escapeHtml(question.answer)}</small></span></label>`).join("")}</div><div class="dialog-actions"><button class="button primary" type="submit">沉淀选中内容</button></div></form></section>`;
 }
 
 function renderReviewDetail(item) {
@@ -181,11 +212,11 @@ function renderReviewDetail(item) {
     <div class="detail-actions">
       ${item.status === "legacy_imported" && !item.summary_50 ? '<button class="button secondary" id="triageButton">生成速览</button>' : ""}
       ${canReview ? '<button class="button primary" data-decision="approve">批准</button><button class="button secondary" data-decision="defer">稍后处理</button><button class="button danger-text" data-decision="reject">拒绝</button>' : ""}
-      ${item.status === "approved" ? '<button class="button primary" id="curateButton">提炼知识点</button>' : ""}
     </div>
     <h3>这条内容回答了什么 ${item.ai_mode ? `<span class="badge">${item.ai_mode === "ai" ? "AI 增强" : "基础提取"}</span>` : ""}</h3>
     <div class="question-list">${questions.length ? questions.map((question, index) => questionBlock(item, question, index)).join("") : '<div class="empty">尚未提取到可审核的问题。</div>'}</div>
     ${canReview ? questionEditor(item, questions) : ""}
+    ${curationSelection(item, questions)}
     <h3>可能重复</h3>${duplicates.length ? `<div class="tag-row">${duplicates.map((row) => `<span class="badge">${escapeHtml(row.title || "相似来源")}</span>`).join("")}</div>` : '<div class="empty">无疑似重复。</div>'}
     <h3>逐字稿节选</h3><div class="transcript">${escapeHtml(item.transcript_excerpt || "没有可显示的逐字稿")}</div>`;
   $$("[data-decision]").forEach((button) => button.addEventListener("click", () => reviewDecision(item.id, button.dataset.decision)));
@@ -194,7 +225,6 @@ function renderReviewDetail(item) {
     notice("已加入速览任务");
     switchView("inbox");
   });
-  $("#curateButton")?.addEventListener("click", () => beginCuration(item));
   $("#questionForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -204,6 +234,8 @@ function renderReviewDetail(item) {
         question: form.querySelector(`[data-question="${index}"]`).value.trim(),
         answer: form.querySelector(`[data-answer="${index}"]`).value.trim(),
         evidence: question.evidence || [],
+        answer_status: answerStatus(question),
+        status_note: question.status_note || "",
       }];
     });
     try {
@@ -212,6 +244,7 @@ function renderReviewDetail(item) {
       await selectReview(item.id);
     } catch (error) { notice(error.message, true); }
   });
+  $("#curateQuestionForm")?.addEventListener("submit", (event) => curateSelectedQuestions(event, item, questions));
 }
 
 async function reviewDecision(sourceId, decision) {
@@ -221,19 +254,40 @@ async function reviewDecision(sourceId, decision) {
   loadDashboard();
 }
 
-async function beginCuration(item) {
+function secondsFromTime(value) {
+  const parts = String(value || "").split(":").map(Number);
+  if (!parts.length || parts.some((part) => !Number.isFinite(part))) return null;
+  return parts.reduce((total, part) => total * 60 + part, 0);
+}
+
+async function curateSelectedQuestions(event, item, questions) {
+  event.preventDefault();
+  const selected = [...event.currentTarget.querySelectorAll("[data-curate-index]:checked")]
+    .map((node) => questions[Number(node.dataset.curateIndex)]);
+  if (!selected.length) {
+    notice("请至少选择一条可回答内容", true);
+    return;
+  }
+  const units = selected.map((question) => ({
+    title: question.question,
+    method_type: "",
+    when_to_use: "",
+    steps: [question.answer],
+    constraints: [],
+    common_questions: [],
+    common_symptoms: [],
+    keywords: item.keywords || [],
+    topic_tags: item.topic_candidates || [],
+    status: "approved",
+    segment_start: secondsFromTime(question.evidence?.[0]?.time),
+  }));
   try {
-    const result = await api(`/api/items/${item.id}/curate`, { method: "POST", body: "{}" });
-    if (result.job_id) {
-      notice("已加入知识点提炼任务");
-      switchView("inbox");
-    }
+    await api(`/api/items/${item.id}/curate`, { method: "POST", body: JSON.stringify({ units }) });
+    notice(`已沉淀 ${units.length} 条知识点`);
+    await selectReview(item.id);
+    loadDashboard();
   } catch (error) {
-    if (error.status === 409 && error.data.manual_required) {
-      openUnitDialog(error.data.prefill, { sourceId: item.id, manual: true });
-    } else {
-      notice(error.message, true);
-    }
+    notice(error.message, true);
   }
 }
 

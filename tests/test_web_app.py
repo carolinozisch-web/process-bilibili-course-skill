@@ -74,6 +74,18 @@ class WebAppTests(unittest.TestCase):
         }], "群面怎么准备")
         self.assertIn("主动推进讨论", answer)
 
+    def test_basic_search_does_not_treat_question_only_as_an_answer(self):
+        answer = answer_from_cards([{
+            "kind": "source",
+            "key_questions": [{
+                "question": "群面应该如何准备？",
+                "answer": "",
+                "answer_status": "question_only",
+                "evidence": [],
+            }],
+        }], "群面怎么准备")
+        self.assertEqual(answer, "没有直接答案")
+
     def test_xiaohongshu_share_url_reaches_worker_memory(self):
         share_url = "https://www.xiaohongshu.com/discovery/item/abcdef1234567890?xsec_token=secret"
         with httpx.Client(base_url=self.base, timeout=5) as client:

@@ -129,7 +129,13 @@ class KnowledgeLayerTests(unittest.TestCase):
         self.assertNotIn("下一期", "".join(data[f"point_{index}"] for index in range(1, 4)))
         self.assertEqual(data["key_questions"][0]["question"], "怎么寻找和管理投递岗位？")
         self.assertEqual(data["key_questions"][0]["evidence"][0]["time"], "00:00:12")
+        self.assertEqual(data["key_questions"][0]["answer_status"], "answered")
         self.assertEqual(data["ai_mode"], "basic")
+
+    def test_basic_triage_marks_an_unanswered_question_without_faking_an_answer(self):
+        data = make_basic_triage("今天想聊一个问题：秋招应该怎么准备？下一期再说。")
+        self.assertEqual(data["key_questions"][0]["answer_status"], "question_only")
+        self.assertEqual(data["key_questions"][0]["answer"], "")
 
     def test_questions_are_saved_edited_and_searchable(self):
         source_id = self.source()
@@ -151,6 +157,21 @@ class KnowledgeLayerTests(unittest.TestCase):
             "evidence": [{"time": "01:34", "excerpt": "主动做阶段总结。"}],
         }])
         self.assertEqual(updated["key_questions"][0]["question"], "群面需要抢主导吗？")
+
+    def test_question_only_candidate_is_preserved_without_becoming_an_answer(self):
+        source_id = self.source()
+        add_triage(self.db, source_id, {"summary_50": "①秋招准备；②问题来源；③暂无答案", "key_questions": [{
+            "question": "秋招应该如何准备？",
+            "answer": "",
+            "answer_status": "question_only",
+            "evidence": [{"time": "00:08", "excerpt": "秋招到底应该怎么准备？"}],
+        }]})
+        detail = source_detail(self.db, source_id)
+        question = detail["key_questions"][0]
+        self.assertEqual(question["answer_status"], "question_only")
+        self.assertEqual(question["answer"], "")
+        updated = update_triage_questions(self.db, source_id, [question])
+        self.assertEqual(updated["key_questions"][0]["answer_status"], "question_only")
 
     def test_duplicate_candidates_require_strong_title_similarity(self):
         source = {
@@ -253,7 +274,7 @@ class KnowledgeLayerTests(unittest.TestCase):
             self.assertNotIn(b"secret-key", request.content)
             content = json.dumps({
                 "questions": [
-                    {"question": "第一步应该做什么？", "answer": "先定义问题。", "evidence": [{"time": "00:10", "excerpt": "定义问题"}]},
+                    {"question": "第一步应该做什么？", "answer_status": "answered", "answer": "先定义问题。", "evidence": [{"time": "00:10", "excerpt": "定义问题"}]},
                     {"question": "执行时怎么拆分？", "answer": "把工作拆分为具体步骤。", "evidence": [{"time": "00:40", "excerpt": "拆分步骤"}]},
                     {"question": "最后如何确认结果？", "answer": "完成后复核最终结果。", "evidence": [{"time": "01:20", "excerpt": "复核结果"}]},
                 ],
@@ -268,6 +289,7 @@ class KnowledgeLayerTests(unittest.TestCase):
         self.assertEqual(data["ai_mode"], "ai")
         self.assertEqual(data["evidence"][0]["time"], "00:10")
         self.assertEqual(data["key_questions"][0]["question"], "第一步应该做什么？")
+        self.assertEqual(data["key_questions"][0]["answer_status"], "answered")
 
 
 class MigrationTests(unittest.TestCase):
