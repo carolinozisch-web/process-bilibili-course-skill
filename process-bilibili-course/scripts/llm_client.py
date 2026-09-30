@@ -71,6 +71,10 @@ class OpenAICompatibleClient:
         parsed = urlparse(self.settings.base_url)
         return f"{parsed.scheme}://{parsed.netloc}/api/chat"
 
+    def request_timeout(self, requested: float) -> float:
+        # Free local models commonly run on CPU and need longer for a full transcript.
+        return max(requested, 300) if self.is_local_ollama else requested
+
     def complete_json(self, system: str, prompt: str, timeout: float = 120) -> dict:
         messages = [
             {"role": "system", "content": system},
@@ -95,7 +99,7 @@ class OpenAICompatibleClient:
                 "options": {"temperature": 0.2},
             }
         try:
-            with httpx.Client(transport=self.transport, timeout=timeout) as client:
+            with httpx.Client(transport=self.transport, timeout=self.request_timeout(timeout)) as client:
                 response = client.post(endpoint, headers=headers, json=payload)
                 response.raise_for_status()
                 body = response.json()
@@ -204,6 +208,8 @@ def triage_with_ai(client: OpenAICompatibleClient, transcript: str, title: str =
         keywords = result.get("keywords", []) if chunks else []
         topics = result.get("topics", []) if chunks else []
     questions = _normalize_triage_questions(candidates)
+    if candidates and not questions:
+        raise LLMError("模型只返回了提示格式，没有提取到可验证的原文问题")
     summary, points = compact_summary([question["question"] for question in questions])
     evidence = [
         {"question_index": index, "point": question["question"], **row}
@@ -247,6 +253,15 @@ def _normalize_triage_questions(values: object) -> list[dict]:
             excerpt = re.sub(r"\s+", " ", str(row.get("excerpt", "")).strip())[:220]
             if time or excerpt:
                 evidence.append({"time": time, "excerpt": excerpt})
+        template_text = " ".join([question, answer, status_note] + [
+            f"{row['time']} {row['excerpt']}" for row in evidence
+        ])
+        # Treat copied prompt examples as a model failure, never as source knowledge.
+        if any(marker in template_text for marker in (
+            "用户会问的具体问题", "原文时间，如", "证据时间", "支持答案或判断的原文",
+            "60到160字", "仅提出问题时留空", "判断说明",
+        )):
+            continue
         if not question and text:
             question = "这条内容的关键做法是什么？"
         if question in {"这条内容的关键做法是什么？", "这条内容给出的关键做法是什么？"}:

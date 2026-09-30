@@ -26,7 +26,7 @@ from knowledge_db import (  # noqa: E402
     set_status, source_detail, update_job, update_triage_questions, upsert_source,
 )
 from llm_client import (  # noqa: E402
-    LLMSettings, OpenAICompatibleClient, _normalize_triage_questions, parse_json_object, triage_with_ai,
+    LLMError, LLMSettings, OpenAICompatibleClient, _normalize_triage_questions, parse_json_object, triage_with_ai,
 )
 
 
@@ -317,9 +317,30 @@ class KnowledgeLayerTests(unittest.TestCase):
         self.assertFalse(captured["payload"]["think"])
         self.assertFalse(captured["payload"]["stream"])
         self.assertNotIn("authorization", captured["headers"])
+        self.assertEqual(client.request_timeout(45), 300)
 
     def test_json_parser_accepts_a_repeated_local_model_reply(self):
         self.assertEqual(parse_json_object('{"ok": true}\n{"ok": true}'), {"ok": True})
+
+    def test_ai_triage_rejects_a_copied_prompt_schema(self):
+        def responder(_request: httpx.Request) -> httpx.Response:
+            content = json.dumps({
+                "questions": [{
+                    "question": "用户会问的具体问题",
+                    "answer": "60到160字、可直接使用的回答；仅提出问题时留空",
+                    "answer_status": "answered",
+                    "status_note": "判断说明",
+                    "evidence": [{"time": "原文时间，如00:42", "excerpt": "支持答案或判断的原文"}],
+                }],
+            }, ensure_ascii=False)
+            return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+        client = OpenAICompatibleClient(
+            LLMSettings("https://example.test/v1", "example-model", "secret-key"),
+            httpx.MockTransport(responder),
+        )
+        with self.assertRaises(LLMError):
+            triage_with_ai(client, "[00:10] 有实际内容", "示例")
 
 
 class MigrationTests(unittest.TestCase):
