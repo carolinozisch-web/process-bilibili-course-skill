@@ -29,7 +29,12 @@ class LLMSettings:
 
     @property
     def configured(self) -> bool:
-        return bool(self.base_url.strip() and self.model.strip() and self.api_key.strip())
+        return bool(self.base_url.strip() and self.model.strip() and (self.api_key.strip() or self.is_local_ollama))
+
+    @property
+    def is_local_ollama(self) -> bool:
+        parsed = urlparse(self.base_url)
+        return parsed.hostname in {"127.0.0.1", "localhost"} and parsed.port == 11434
 
     def public(self) -> dict:
         return {
@@ -59,8 +64,7 @@ class OpenAICompatibleClient:
     @property
     def is_local_ollama(self) -> bool:
         """Use Ollama's native API so Qwen can run without its slow thinking mode."""
-        parsed = urlparse(self.settings.base_url)
-        return parsed.hostname in {"127.0.0.1", "localhost"} and parsed.port == 11434
+        return self.settings.is_local_ollama
 
     @property
     def ollama_endpoint(self) -> str:

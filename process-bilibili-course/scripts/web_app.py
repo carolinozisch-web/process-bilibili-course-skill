@@ -73,12 +73,32 @@ class AppState:
     def __init__(self, workspace: Path):
         self.workspace = workspace.resolve()
         self.db_path = self.workspace / "知识库" / "knowledge.db"
+        self.local_model_path = self.workspace / "知识库" / "local_model.json"
         self.assets = Path(__file__).resolve().parents[1] / "assets" / "web"
         self.settings = LLMSettings.from_environment()
+        if not self.settings.configured:
+            self.settings = self._load_local_model_settings() or self.settings
         self.settings_lock = threading.Lock()
         db = connect(self.db_path)
         db.close()
         self.worker = JobWorker(self.db_path, self.workspace, self.client)
+
+    def _load_local_model_settings(self) -> LLMSettings | None:
+        try:
+            saved = json.loads(self.local_model_path.read_text(encoding="utf-8"))
+            settings = LLMSettings(str(saved.get("base_url", "")), str(saved.get("model", "")))
+            return settings if settings.is_local_ollama and settings.configured else None
+        except (OSError, json.JSONDecodeError, AttributeError):
+            return None
+
+    def _save_local_model_settings(self) -> None:
+        if not self.settings.is_local_ollama:
+            return
+        self.local_model_path.parent.mkdir(parents=True, exist_ok=True)
+        self.local_model_path.write_text(json.dumps({
+            "base_url": self.settings.base_url,
+            "model": self.settings.model,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def client(self) -> OpenAICompatibleClient | None:
         with self.settings_lock:
@@ -93,6 +113,7 @@ class AppState:
                 self.settings.api_key = str(values["api_key"]).strip()
             if values.get("clear_api_key"):
                 self.settings.api_key = ""
+            self._save_local_model_settings()
             return self.settings.public()
 
 

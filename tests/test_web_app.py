@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import threading
@@ -99,6 +100,23 @@ class WebAppTests(unittest.TestCase):
             self.assertNotEqual(second.server_address[1], self.server.server_address[1])
         finally:
             second.server_close()
+
+    def test_local_ollama_profile_persists_without_a_key(self):
+        with httpx.Client(base_url=self.base, timeout=5) as client:
+            client.put("/api/settings/llm", json={
+                "base_url": "http://127.0.0.1:11434/v1", "model": "qwen3:4b", "api_key": "ollama",
+            })
+        profile = Path(self.temp.name) / "知识库" / "local_model.json"
+        self.assertEqual(json.loads(profile.read_text(encoding="utf-8")), {
+            "base_url": "http://127.0.0.1:11434/v1", "model": "qwen3:4b",
+        })
+        restored = make_server(Path(self.temp.name), 18980)
+        try:
+            self.assertTrue(restored.state.settings.configured)
+            self.assertFalse(restored.state.settings.public()["has_api_key"])
+            self.assertEqual(restored.state.settings.model, "qwen3:4b")
+        finally:
+            restored.server_close()
 
 
 if __name__ == "__main__":
