@@ -8,6 +8,7 @@ import os
 import re
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -55,22 +56,46 @@ class OpenAICompatibleClient:
         base = self.settings.base_url.rstrip("/")
         return base if base.endswith("/chat/completions") else f"{base}/chat/completions"
 
+    @property
+    def is_local_ollama(self) -> bool:
+        """Use Ollama's native API so Qwen can run without its slow thinking mode."""
+        parsed = urlparse(self.settings.base_url)
+        return parsed.hostname in {"127.0.0.1", "localhost"} and parsed.port == 11434
+
+    @property
+    def ollama_endpoint(self) -> str:
+        parsed = urlparse(self.settings.base_url)
+        return f"{parsed.scheme}://{parsed.netloc}/api/chat"
+
     def complete_json(self, system: str, prompt: str, timeout: float = 120) -> dict:
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ]
         headers = {"Authorization": f"Bearer {self.settings.api_key}", "Content-Type": "application/json"}
-        payload = {
+        endpoint = self.endpoint
+        payload: dict[str, Any] = {
             "model": self.settings.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": prompt},
-            ],
+            "messages": messages,
             "temperature": 0.2,
         }
+        if self.is_local_ollama:
+            # The OpenAI-compatible route does not reliably forward think=False for Qwen3.
+            endpoint = self.ollama_endpoint
+            headers = {"Content-Type": "application/json"}
+            payload = {
+                "model": self.settings.model,
+                "messages": messages,
+                "stream": False,
+                "think": False,
+                "options": {"temperature": 0.2},
+            }
         try:
             with httpx.Client(transport=self.transport, timeout=timeout) as client:
-                response = client.post(self.endpoint, headers=headers, json=payload)
+                response = client.post(endpoint, headers=headers, json=payload)
                 response.raise_for_status()
                 body = response.json()
-            content = body["choices"][0]["message"]["content"]
+            content = body["message"]["content"] if self.is_local_ollama else body["choices"][0]["message"]["content"]
             return parse_json_object(content)
         except (httpx.HTTPError, KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
             raise LLMError(f"模型服务返回异常：{exc}") from exc
@@ -90,10 +115,12 @@ def parse_json_object(content: str) -> dict:
     if fenced:
         text = fenced.group(1)
     else:
-        start, end = text.find("{"), text.rfind("}")
-        if start >= 0 and end > start:
-            text = text[start:end + 1]
-    value = json.loads(text)
+        start = text.find("{")
+        if start >= 0:
+            text = text[start:]
+    # Small local models sometimes repeat a valid JSON reply. Decode the first
+    # complete object instead of treating an otherwise usable response as failed.
+    value, _ = json.JSONDecoder().raw_decode(text)
     if not isinstance(value, dict):
         raise json.JSONDecodeError("expected object", text, 0)
     return value

@@ -25,7 +25,9 @@ from knowledge_db import (  # noqa: E402
     link_topic_unit, link_unit_source, list_jobs, requeue_interrupted_jobs, retry_job, review_queue, search,
     set_status, source_detail, update_job, update_triage_questions, upsert_source,
 )
-from llm_client import LLMSettings, OpenAICompatibleClient, _normalize_triage_questions, triage_with_ai  # noqa: E402
+from llm_client import (  # noqa: E402
+    LLMSettings, OpenAICompatibleClient, _normalize_triage_questions, parse_json_object, triage_with_ai,
+)
 
 
 class KnowledgeLayerTests(unittest.TestCase):
@@ -298,6 +300,26 @@ class KnowledgeLayerTests(unittest.TestCase):
         self.assertEqual(data["evidence"][0]["time"], "00:10")
         self.assertEqual(data["key_questions"][0]["question"], "第一步应该做什么？")
         self.assertEqual(data["key_questions"][0]["answer_status"], "answered")
+
+    def test_local_ollama_uses_native_api_without_thinking(self):
+        captured = {}
+
+        def responder(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            captured["headers"] = dict(request.headers)
+            captured["payload"] = json.loads(request.content)
+            return httpx.Response(200, json={"message": {"content": '{"ok": true}'}})
+
+        settings = LLMSettings("http://127.0.0.1:11434/v1", "qwen3:4b", "ollama")
+        client = OpenAICompatibleClient(settings, httpx.MockTransport(responder))
+        self.assertEqual(client.test(), {"ok": True, "model": "qwen3:4b"})
+        self.assertEqual(captured["url"], "http://127.0.0.1:11434/api/chat")
+        self.assertFalse(captured["payload"]["think"])
+        self.assertFalse(captured["payload"]["stream"])
+        self.assertNotIn("authorization", captured["headers"])
+
+    def test_json_parser_accepts_a_repeated_local_model_reply(self):
+        self.assertEqual(parse_json_object('{"ok": true}\n{"ok": true}'), {"ok": True})
 
 
 class MigrationTests(unittest.TestCase):
