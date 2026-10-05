@@ -8,7 +8,7 @@ description: Process public Bilibili or Xiaohongshu courses and personal saved l
 Use one of two modes:
 
 - **Course mode** creates a complete, resumable course archive with transcripts, detailed notes, navigation, and a concise collection.
-- **Saved-item mode** imports personal links into a local review queue, transcribes them, generates a short triage record, and waits for explicit approval before creating reusable knowledge cards.
+- **Saved-item mode** imports personal links into a local review queue, transcribes them, generates a video overview and logical sections, and waits for explicit approval before creating knowledge nodes. An editable organization proposal requires a separate confirmation before topic-tree placement.
 
 Never extract browser cookies, bypass authentication or payment controls, or automatically delete a platform collection item.
 
@@ -43,7 +43,7 @@ Saved-item invariants:
 - Read the complete transcript for triage; do not summarize only its beginning.
 - Keep every raw source even when several sources support the same method card.
 - Treat migrated archives as `legacy_imported`, not as newly reviewed material.
-- Keep API keys in process memory or environment variables only. Never write them to files, SQLite, logs, jobs, or exports.
+- Keep API keys in process memory or environment variables by default. Only an explicit user opt-in may save them with the bundled Windows Credential Manager helper. Never write them to plaintext files, SQLite, logs, jobs, exports, or Git.
 - A missing direct search answer is valid. Return related sources instead of inventing an answer.
 
 ## Course mode

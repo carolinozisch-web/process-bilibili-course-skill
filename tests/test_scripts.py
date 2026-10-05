@@ -33,6 +33,13 @@ course_utils = load_module(
 
 
 class PipelineTests(unittest.TestCase):
+
+    def test_bilibili_page_fallback_extracts_public_metadata_and_audio(self):
+        from video_pipeline import json_after_marker, public_audio_url
+        initial = 'prefix window.__INITIAL_STATE__={"videoData":{"title":"公开视频","pages":[{"page":1,"cid":12}]}}; suffix'
+        playinfo = 'window.__playinfo__={"data":{"dash":{"audio":[{"bandwidth":302,"baseUrl":"https://media.example/audio"}]}}};'
+        self.assertEqual(json_after_marker(initial, "window.__INITIAL_STATE__=")["videoData"]["title"], "公开视频")
+        self.assertEqual(public_audio_url(json_after_marker(playinfo, "window.__playinfo__=")["data"]), "https://media.example/audio")
     def test_extract_bvid(self):
         self.assertEqual(
             pipeline.extract_bvid("https://www.bilibili.com/video/BV19x411X7C6?p=2"),

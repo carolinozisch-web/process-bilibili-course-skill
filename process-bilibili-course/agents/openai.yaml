@@ -1,4 +1,4 @@
 interface:
-  display_name: "今天你收了吗"
+  display_name: "ClearVault"
   short_description: "把公开视频课程与收藏整理成可审核、可追溯的本地知识库"
   default_prompt: "Use $process-bilibili-course to process this public video or saved link with local transcription, review-first triage, and source-linked knowledge cards."

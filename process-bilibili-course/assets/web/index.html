@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>今天你收了吗</title>
+  <title>ClearVault</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <div class="app-shell">
     <aside class="sidebar">
       <div class="brand">
-        <strong>今天你收了吗</strong>
+        <strong>ClearVault</strong>
         <span>个人知识收件箱</span>
       </div>
       <nav aria-label="主要导航">
@@ -79,6 +79,7 @@
         <div class="segmented" role="tablist" aria-label="审核队列">
           <button class="active" data-queue="recent">近 48 小时</button>
           <button data-queue="historical">历史待审</button>
+          <button data-queue="approved">已批准待沉淀</button>
           <button data-queue="legacy">旧资料</button>
         </div>
         <div class="split-view">
@@ -92,6 +93,10 @@
       <section id="view-knowledge" class="view">
         <div class="section-heading">
           <div><h2>知识地图</h2><p>从主题逐层展开知识点，原始视频仅作为出处保留。</p></div>
+          <div class="form-row actions-left">
+            <button id="suggestOrganizationButton" class="button primary" type="button">AI 建议归档</button>
+            <button id="newTopicButton" class="button secondary" type="button">新建主题</button>
+          </div>
         </div>
         <div id="knowledgeLayout" class="knowledge-layout" hidden>
           <aside class="topic-panel">
@@ -109,6 +114,7 @@
           <label class="sr-only" for="searchInput">搜索知识库</label>
           <input id="searchInput" type="search" placeholder="例如：怎样判断一个回归模型是否可靠？" required>
           <button class="button primary" type="submit">搜索</button>
+          <button id="aiSearchButton" class="button secondary" type="button">AI 整理</button>
         </form>
         <div id="searchAnswer" class="answer-panel" hidden></div>
         <div id="searchResults" class="search-results"></div>
@@ -118,16 +124,19 @@
         <div class="settings-layout">
           <form id="settingsForm" class="settings-form">
             <h2>可选 AI 增强</h2>
-            <p>兼容使用 Chat Completions 协议的服务。API Key 只保留在本次程序运行的内存中。</p>
+            <p>兼容使用 Chat Completions 协议的服务。</p>
             <label for="baseUrl">服务地址</label>
             <input id="baseUrl" type="url" placeholder="https://api.example.com/v1">
             <label for="modelName">模型名</label>
             <input id="modelName" type="text" placeholder="模型标识">
+            <label for="fallbackModel">备用模型（可选）</label>
+            <input id="fallbackModel" type="text" placeholder="主模型暂时不可用时尝试一次">
             <label for="apiKey">API Key</label>
-            <input id="apiKey" type="password" autocomplete="off" placeholder="关闭程序后自动清除">
+            <input id="apiKey" type="password" autocomplete="off" placeholder="仅在本次运行中保留">
+            <label class="checkbox" for="rememberApiKey"><input id="rememberApiKey" type="checkbox">在这台电脑上记住 API Key</label>
             <div class="form-row actions-left">
               <button class="button primary" type="submit">保存并测试</button>
-              <button id="clearKeyButton" class="button danger-text" type="button">清除 Key</button>
+              <button id="clearKeyButton" class="button danger-text" type="button">移除本机设置</button>
             </div>
             <div id="llmStatus" class="inline-status">当前为基础模式。</div>
           </form>
@@ -155,6 +164,46 @@
       <label for="unitConstraints">限制，每行一项</label><textarea id="unitConstraints" rows="3"></textarea>
       <label for="unitKeywords">关键词，用逗号分隔</label><input id="unitKeywords">
       <div class="dialog-actions"><button class="button secondary" type="button" id="cancelUnit">取消</button><button class="button primary" type="submit">保存</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="topicDialog">
+    <form id="topicForm" method="dialog">
+      <div class="dialog-heading"><h2 id="topicDialogTitle">归入主题</h2><button id="closeTopicDialog" class="icon-button" type="button" aria-label="关闭">×</button></div>
+      <input id="topicUnitId" type="hidden">
+      <label for="topicMode">操作</label>
+      <select id="topicMode"><option value="existing">归入已有主题</option><option value="new">新建主题</option></select>
+      <div id="existingTopicFields">
+        <label for="existingTopicSelect">选择主题</label><select id="existingTopicSelect"></select>
+      </div>
+      <div id="newTopicFields" hidden>
+        <label for="newTopicTitle">主题名称</label><input id="newTopicTitle" maxlength="80">
+        <label for="newTopicParent">上级主题</label><select id="newTopicParent"></select>
+        <label for="newTopicDescription">主题说明（可选）</label><textarea id="newTopicDescription" rows="2" maxlength="240"></textarea>
+      </div>
+      <div class="dialog-actions"><button class="button secondary" type="button" id="cancelTopic">取消</button><button class="button primary" type="submit">保存</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="organizationDialog">
+    <form id="organizationForm" method="dialog">
+      <div class="dialog-heading"><h2>AI 建议归档</h2><button id="closeOrganizationDialog" class="icon-button" type="button" aria-label="关闭">×</button></div>
+      <p class="dialog-note">先查看建议，再确认写入。生成建议不会改动任何主题或知识点。</p>
+      <label for="organizationSource">选择已沉淀的视频</label>
+      <select id="organizationSource"></select>
+      <div class="form-row actions-left"><button id="generateOrganizationButton" class="button secondary" type="button">生成建议</button><span id="organizationStatus" class="inline-message"></span></div>
+      <div id="organizationProposal" hidden>
+        <div class="proposal-summary"><span id="proposalType" class="badge success"></span><strong id="proposalReason"></strong></div>
+        <label for="proposalRootMode">归档位置</label>
+        <select id="proposalRootMode"><option value="new">新建主题</option><option value="existing">归入已有主题</option></select>
+        <div id="proposalExistingFields" hidden><label for="proposalExistingTopic">已有主题</label><select id="proposalExistingTopic"></select></div>
+        <div id="proposalNewFields"><label for="proposalRootTitle">主题名称</label><input id="proposalRootTitle" maxlength="80"><label for="proposalRootDescription">主题说明</label><textarea id="proposalRootDescription" rows="2" maxlength="240"></textarea></div>
+        <label for="proposalBranches">建议结构</label>
+        <textarea id="proposalBranches" rows="6" aria-describedby="proposalBranchesHelp"></textarea>
+        <p id="proposalBranchesHelp" class="field-note">AI 已填入结构；每行一个分支，用“&gt;”表示下级。例如：商业模式 &gt; 利润来源。</p>
+        <div id="proposalAssignments" class="proposal-assignments"></div>
+      </div>
+      <div class="dialog-actions"><button class="button secondary" type="button" id="cancelOrganization">取消</button><button id="applyOrganizationButton" class="button primary" type="submit" disabled>确认写入知识库</button></div>
     </form>
   </dialog>
 

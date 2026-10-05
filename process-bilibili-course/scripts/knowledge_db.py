@@ -13,7 +13,7 @@ from typing import Iterable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 7
 SOURCE_STATUSES = {
     "discovered", "transcribed", "triage_ready", "approved", "deferred",
     "rejected", "curated", "legacy_imported", "error",
@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS triage (
     usable_content_start TEXT,
     evidence_json TEXT NOT NULL DEFAULT '[]',
     key_questions_json TEXT NOT NULL DEFAULT '[]',
+    video_outline_json TEXT NOT NULL DEFAULT '{}',
     ai_mode TEXT NOT NULL DEFAULT 'basic',
     created_at TEXT NOT NULL
 );
@@ -91,6 +92,7 @@ CREATE TABLE IF NOT EXISTS knowledge_topics (
     id INTEGER PRIMARY KEY,
     title TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
+    topic_type TEXT NOT NULL DEFAULT '',
     parent_id INTEGER REFERENCES knowledge_topics(id) ON DELETE CASCADE,
     position INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
@@ -125,7 +127,9 @@ CREATE TABLE IF NOT EXISTS processing_jobs (
     created_at TEXT NOT NULL,
     started_at TEXT,
     finished_at TEXT,
-    error_message TEXT
+    error_message TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    retry_after TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status_created ON processing_jobs(status, created_at);
 CREATE VIRTUAL TABLE IF NOT EXISTS source_fts USING fts5(
@@ -142,7 +146,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS triage_fts USING fts5(
 
 JSON_FIELDS = {
     "keywords", "topic_candidates", "source_signals", "possible_duplicates",
-    "new_points", "evidence_json", "key_questions_json", "steps", "constraints", "common_questions",
+    "new_points", "evidence_json", "key_questions_json", "video_outline_json", "steps", "constraints", "common_questions",
     "common_symptoms", "topic_tags", "payload", "returned_unit_ids",
 }
 
@@ -195,7 +199,11 @@ def _ensure_column(db: sqlite3.Connection, table: str, definition: str) -> None:
 def _migrate(db: sqlite3.Connection) -> None:
     _ensure_column(db, "triage", "evidence_json TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(db, "triage", "key_questions_json TEXT NOT NULL DEFAULT '[]'")
+    _ensure_column(db, "triage", "video_outline_json TEXT NOT NULL DEFAULT '{}'")
     _ensure_column(db, "triage", "ai_mode TEXT NOT NULL DEFAULT 'basic'")
+    _ensure_column(db, "processing_jobs", "attempt_count INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(db, "processing_jobs", "retry_after TEXT")
+    _ensure_column(db, "knowledge_topics", "topic_type TEXT NOT NULL DEFAULT ''")
     db.execute("""
         UPDATE source_items
         SET status='legacy_imported', reviewed_at=NULL, review_decision='legacy_migration'
@@ -302,7 +310,8 @@ def source_detail(db: sqlite3.Connection, source_id: int) -> dict | None:
     source = _decoded(db.execute("""
         SELECT s.*, t.summary_50, t.point_1, t.point_2, t.point_3, t.keywords,
                t.topic_candidates, t.source_signals, t.possible_duplicates,
-               t.new_points, t.usable_content_start, t.evidence_json, t.key_questions_json, t.ai_mode
+               t.new_points, t.usable_content_start, t.evidence_json, t.key_questions_json,
+               t.video_outline_json, t.ai_mode
         FROM source_items s LEFT JOIN triage t ON t.source_item_id=s.id
         WHERE s.id=?
     """, (source_id,)).fetchone())
@@ -317,6 +326,15 @@ def source_detail(db: sqlite3.Connection, source_id: int) -> dict | None:
             evidence["source_url_at"] = _source_url_at(
                 source.get("canonical_url", ""), evidence.get("time")
             )
+    source["video_outline"] = source.get("video_outline_json") or {}
+    for section in source["video_outline"].get("sections", []):
+        if not isinstance(section, dict):
+            continue
+        for evidence in section.get("evidence", []):
+            if isinstance(evidence, dict):
+                evidence["source_url_at"] = _source_url_at(
+                    source.get("canonical_url", ""), evidence.get("time")
+                )
     source["basic_clues"] = []
     for evidence in source.get("evidence_json") or []:
         if not isinstance(evidence, dict) or not evidence.get("excerpt"):
@@ -356,10 +374,19 @@ def add_triage(db: sqlite3.Connection, source_id: int, data: dict) -> None:
     summary = str(data.get("summary_50", "")).strip()
     if len(summary) > 50:
         raise ValueError("summary_50 must be at most 50 characters")
-    if not all(marker in summary for marker in ("①", "②", "③")):
-        raise ValueError("summary_50 must contain ①, ② and ③")
     questions = _normalize_questions(data.get("key_questions", []))
-    if questions:
+    outline = _normalize_outline(data.get("video_outline", {}))
+    if outline:
+        summary = outline["overview"][:50] or summary
+        points = [section["title"] for section in outline["sections"]]
+        while len(points) < 3:
+            points.append("")
+        evidence = [
+            {"section_index": index, "point": section["title"], **row}
+            for index, section in enumerate(outline["sections"], 1)
+            for row in section["evidence"]
+        ]
+    elif questions:
         summary, points, evidence = _legacy_triage_fields(questions)
     else:
         points = [data.get("point_1", ""), data.get("point_2", ""), data.get("point_3", "")]
@@ -367,8 +394,8 @@ def add_triage(db: sqlite3.Connection, source_id: int, data: dict) -> None:
     db.execute("""
         INSERT INTO triage(source_item_id, summary_50, point_1, point_2, point_3, keywords,
             topic_candidates, source_signals, possible_duplicates, new_points, usable_content_start,
-            evidence_json, key_questions_json, ai_mode, created_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            evidence_json, key_questions_json, video_outline_json, ai_mode, created_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(source_item_id) DO UPDATE SET
             summary_50=excluded.summary_50, point_1=excluded.point_1, point_2=excluded.point_2,
             point_3=excluded.point_3, keywords=excluded.keywords,
@@ -376,15 +403,16 @@ def add_triage(db: sqlite3.Connection, source_id: int, data: dict) -> None:
             possible_duplicates=excluded.possible_duplicates, new_points=excluded.new_points,
             usable_content_start=excluded.usable_content_start, evidence_json=excluded.evidence_json,
             key_questions_json=excluded.key_questions_json,
+            video_outline_json=excluded.video_outline_json,
             ai_mode=excluded.ai_mode, created_at=excluded.created_at
     """, (
         source_id, summary, points[0], points[1], points[2],
         as_json(data.get("keywords", [])), as_json(data.get("topic_candidates", [])),
         as_json(data.get("source_signals", [])), as_json(data.get("possible_duplicates", [])),
         as_json(data.get("new_points", [])), data.get("usable_content_start"),
-        as_json(evidence), as_json(questions), data.get("ai_mode", "basic"), data.get("created_at") or now_iso(),
+        as_json(evidence), as_json(questions), as_json(outline), data.get("ai_mode", "basic"), data.get("created_at") or now_iso(),
     ))
-    _index_triage(db, source_id, questions)
+    _index_triage(db, source_id, questions, outline)
     db.execute("""
         UPDATE source_items SET status='triage_ready', error_message=NULL
         WHERE id=? AND status IN ('discovered','transcribed','error')
@@ -431,6 +459,31 @@ def _normalize_questions(value: object) -> list[dict]:
     return questions
 
 
+def _normalize_outline(value: object) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    overview = re.sub(r"\s+", " ", str(value.get("overview", "")).strip())[:220]
+    sections = []
+    for item in value.get("sections", [])[:5] if isinstance(value.get("sections"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        title = re.sub(r"\s+", " ", str(item.get("title", "")).strip())[:48]
+        summary = re.sub(r"\s+", " ", str(item.get("summary", "")).strip())[:180]
+        points = [re.sub(r"\s+", " ", str(point).strip())[:120]
+                  for point in item.get("points", []) if str(point).strip()][:4]
+        evidence = []
+        for row in item.get("evidence", []) if isinstance(item.get("evidence"), list) else []:
+            if not isinstance(row, dict):
+                continue
+            time = str(row.get("time", "")).strip()[:20]
+            excerpt = re.sub(r"\s+", " ", str(row.get("excerpt", "")).strip())[:220]
+            if time or excerpt:
+                evidence.append({"time": time, "excerpt": excerpt})
+        if title and summary and evidence:
+            sections.append({"title": title, "summary": summary, "points": points, "evidence": evidence[:3]})
+    return {"overview": overview, "sections": sections} if overview and sections else {}
+
+
 def _legacy_triage_fields(questions: list[dict]) -> tuple[str, list[str], list[dict]]:
     defaults = ["未提取到独立问题", "缺少可验证答案", "建议人工查看原文"]
     points = [question["question"] for question in questions]
@@ -444,9 +497,20 @@ def _legacy_triage_fields(questions: list[dict]) -> tuple[str, list[str], list[d
     return summary, points[:3], evidence
 
 
-def _index_triage(db: sqlite3.Connection, source_id: int, questions: list[dict]) -> None:
+def _index_triage(db: sqlite3.Connection, source_id: int, questions: list[dict], outline: dict | None = None) -> None:
     db.execute("DELETE FROM triage_fts WHERE source_item_id=?", (source_id,))
-    if questions:
+    outline = outline or {}
+    if outline.get("sections"):
+        db.execute("""
+            INSERT INTO triage_fts(source_item_id, question_text, answer_text) VALUES(?,?,?)
+        """, (
+            source_id,
+            " ".join(section["title"] for section in outline["sections"]),
+            " ".join([outline.get("overview", "")] + [
+                " ".join([section["summary"], *section["points"]]) for section in outline["sections"]
+            ]),
+        ))
+    elif questions:
         db.execute("""
             INSERT INTO triage_fts(source_item_id, question_text, answer_text) VALUES(?,?,?)
         """, (
@@ -484,7 +548,12 @@ def review_queue(db: sqlite3.Connection, now: str | None = None, limit: int = 10
     for row in rows:
         saved = row.get("saved_at") or row.get("imported_at")
         (recent if saved and saved >= cutoff else historical).append(row)
-    return {"recent": recent, "historical": historical}
+    # Approved sources must remain reachable until their knowledge nodes have been created.
+    return {
+        "recent": recent,
+        "historical": historical,
+        "approved": list_sources(db, status="approved", limit=limit),
+    }
 
 
 def _unit_values(unit: dict) -> tuple:
@@ -622,7 +691,7 @@ def list_units(db: sqlite3.Connection, limit: int = 100) -> list[dict]:
 
 
 def add_topic(db: sqlite3.Connection, title: str, *, description: str = "",
-              parent_id: int | None = None, position: int = 0) -> int:
+              topic_type: str = "", parent_id: int | None = None, position: int = 0) -> int:
     title = title.strip()
     if not title:
         raise ValueError("topic title is required")
@@ -638,13 +707,14 @@ def add_topic(db: sqlite3.Connection, title: str, *, description: str = "",
     if existing:
         topic_id = int(existing[0])
         db.execute("""
-            UPDATE knowledge_topics SET description=?, position=?, updated_at=? WHERE id=?
-        """, (description, position, stamp, topic_id))
+            UPDATE knowledge_topics SET description=CASE WHEN ? != '' THEN ? ELSE description END,
+                topic_type=CASE WHEN ? != '' THEN ? ELSE topic_type END, position=?, updated_at=? WHERE id=?
+        """, (description, description, topic_type, topic_type, position, stamp, topic_id))
     else:
         db.execute("""
-            INSERT INTO knowledge_topics(title, description, parent_id, position, created_at, updated_at)
-            VALUES(?,?,?,?,?,?)
-        """, (title, description, parent_id, position, stamp, stamp))
+            INSERT INTO knowledge_topics(title, description, topic_type, parent_id, position, created_at, updated_at)
+            VALUES(?,?,?,?,?,?,?)
+        """, (title, description, topic_type, parent_id, position, stamp, stamp))
         topic_id = int(db.execute("SELECT last_insert_rowid()").fetchone()[0])
     db.commit()
     return topic_id
@@ -663,11 +733,26 @@ def link_topic_unit(db: sqlite3.Connection, topic_id: int, unit_id: int,
     db.commit()
 
 
+def set_primary_topic(db: sqlite3.Connection, topic_id: int, unit_id: int,
+                      position: int = 0) -> None:
+    """Move a knowledge node to one deliberate primary place in the tree."""
+    if not db.execute("SELECT 1 FROM knowledge_topics WHERE id=?", (topic_id,)).fetchone():
+        raise ValueError(f"topic not found: {topic_id}")
+    if not db.execute("SELECT 1 FROM knowledge_units WHERE id=?", (unit_id,)).fetchone():
+        raise ValueError(f"knowledge unit not found: {unit_id}")
+    db.execute("DELETE FROM topic_units WHERE knowledge_unit_id=?", (unit_id,))
+    db.execute(
+        "INSERT INTO topic_units(topic_id, knowledge_unit_id, position) VALUES(?,?,?)",
+        (topic_id, unit_id, position),
+    )
+    db.commit()
+
+
 def knowledge_tree(db: sqlite3.Connection) -> list[dict]:
     topics = {
         row["id"]: {**dict(row), "kind": "topic", "children": [], "units": []}
         for row in db.execute("""
-            SELECT id, title, description, parent_id, position
+            SELECT id, title, description, topic_type, parent_id, position
             FROM knowledge_topics ORDER BY position, id
         """)
     }
@@ -693,6 +778,88 @@ def knowledge_tree(db: sqlite3.Connection) -> list[dict]:
             "children": [], "units": ungrouped,
         })
     return roots
+
+
+def source_units(db: sqlite3.Connection, source_id: int) -> list[dict]:
+    """Return only the knowledge nodes whose provenance includes this source."""
+    ids = [row[0] for row in db.execute("""
+        SELECT knowledge_unit_id FROM unit_sources
+        WHERE source_item_id=? ORDER BY knowledge_unit_id
+    """, (source_id,))]
+    return [unit for unit_id in ids if (unit := get_unit(db, unit_id))]
+
+
+def _ensure_topic_path(db: sqlite3.Connection, root_id: int, path: list[str],
+                       *, topic_type: str = "", descriptions: dict[tuple[str, ...], str] | None = None) -> int:
+    parent_id = root_id
+    walked: list[str] = []
+    for position, title in enumerate(path):
+        walked.append(title)
+        parent_id = add_topic(
+            db, title,
+            description=(descriptions or {}).get(tuple(walked), ""),
+            parent_id=parent_id, position=position,
+        )
+    return parent_id
+
+
+def apply_organization_plan(db: sqlite3.Connection, source_id: int, plan: dict) -> dict:
+    """Apply a user-confirmed plan; never infer or move nodes outside this source."""
+    source = get_source(db, source_id)
+    if not source or source["status"] not in {"approved", "curated"}:
+        raise ValueError("只有已批准的内容可以写入知识库")
+    allowed = {unit["id"] for unit in source_units(db, source_id)}
+    if not allowed:
+        raise ValueError("这条内容还没有可归档的知识点")
+    root = plan.get("root") if isinstance(plan.get("root"), dict) else {}
+    root_mode = str(root.get("mode", "new"))
+    topic_type = str(plan.get("architecture_type", "")).strip()[:40]
+    if root_mode == "existing":
+        try:
+            root_id = int(root.get("existing_topic_id"))
+        except (TypeError, ValueError):
+            raise ValueError("请选择一个已有主题")
+        if not db.execute("SELECT 1 FROM knowledge_topics WHERE id=?", (root_id,)).fetchone():
+            raise ValueError("选择的已有主题不存在")
+    else:
+        root_id = add_topic(
+            db, str(root.get("title", "")),
+            description=str(root.get("description", ""))[:240], topic_type=topic_type,
+        )
+    branch_paths: set[tuple[str, ...]] = {()}
+    descriptions: dict[tuple[str, ...], str] = {}
+    for branch in plan.get("branches", [])[:12] if isinstance(plan.get("branches"), list) else []:
+        if not isinstance(branch, dict):
+            continue
+        path = [str(part).strip()[:80] for part in branch.get("path", [])
+                if str(part).strip()][:3]
+        if not path:
+            continue
+        branch_paths.add(tuple(path))
+        descriptions[tuple(path)] = str(branch.get("description", ""))[:240]
+    path_ids = {path: _ensure_topic_path(db, root_id, list(path), descriptions=descriptions)
+                for path in sorted(branch_paths, key=lambda item: (len(item), item))}
+    assigned = []
+    for assignment in plan.get("assignments", [])[:len(allowed)] if isinstance(plan.get("assignments"), list) else []:
+        if not isinstance(assignment, dict):
+            continue
+        try:
+            unit_id = int(assignment.get("unit_id"))
+        except (TypeError, ValueError):
+            continue
+        if unit_id not in allowed:
+            continue
+        path = tuple(str(part).strip()[:80] for part in assignment.get("path", [])
+                     if str(part).strip())[:3]
+        target_id = path_ids.get(path, root_id)
+        set_primary_topic(db, target_id, unit_id)
+        assigned.append(unit_id)
+    # A proposal should not strand a source node merely because its title did
+    # not match one of the suggested branches.
+    for unit_id in allowed - set(assigned):
+        set_primary_topic(db, root_id, unit_id)
+        assigned.append(unit_id)
+    return {"root_id": root_id, "unit_ids": assigned, "topic_type": topic_type}
 
 
 def index_source(db: sqlite3.Connection, source_id: int, text: str) -> None:
@@ -725,11 +892,13 @@ def basic_query_terms(query: str) -> list[str]:
     return list(dict.fromkeys(term for term in terms if len(term) >= 2))[:32]
 
 
-def search(db: sqlite3.Connection, query: str, limit: int = 20) -> list[dict]:
+def search(db: sqlite3.Connection, query: str, limit: int = 20, *, include_unreviewed: bool = False) -> list[dict]:
     query = query.strip()
     if not query:
         return []
     results, seen = [], set()
+    source_statuses = "('approved','curated')" if not include_unreviewed else \
+        "('approved','curated','triage_ready','transcribed','legacy_imported')"
     terms = basic_query_terms(query)
     match = _fts_query(" ".join(terms[1:] or terms))
     if match:
@@ -742,17 +911,15 @@ def search(db: sqlite3.Connection, query: str, limit: int = 20) -> list[dict]:
             ("source", """
                 SELECT s.id, bm25(triage_fts) AS score FROM triage_fts
                 JOIN source_items s ON s.id=triage_fts.source_item_id
-                WHERE triage_fts MATCH ? AND s.status IN
-                    ('approved','curated','triage_ready','transcribed','legacy_imported')
+                WHERE triage_fts MATCH ? AND s.status IN %s
                 ORDER BY score LIMIT ?
-            """),
+            """ % source_statuses),
             ("source", """
                 SELECT s.id, bm25(source_fts) AS score FROM source_fts
                 JOIN source_items s ON s.id=source_fts.source_item_id
-                WHERE source_fts MATCH ? AND s.status IN
-                    ('approved','curated','triage_ready','transcribed','legacy_imported')
+                WHERE source_fts MATCH ? AND s.status IN %s
                 ORDER BY score LIMIT ?
-            """),
+            """ % source_statuses),
         ):
             try:
                 rows = db.execute(sql, (match, limit)).fetchall()
@@ -780,9 +947,9 @@ def search(db: sqlite3.Connection, query: str, limit: int = 20) -> list[dict]:
                 SELECT s.id FROM source_items s
                 LEFT JOIN source_fts f ON f.source_item_id=s.id
                 LEFT JOIN triage t ON t.source_item_id=s.id
-                WHERE s.status IN ('approved','curated','triage_ready','transcribed','legacy_imported')
-                  AND (s.title LIKE ? OR f.transcript_text LIKE ? OR t.key_questions_json LIKE ?) LIMIT ?
-            """, (like, like, like, limit))
+                WHERE s.status IN %s
+                  AND (s.title LIKE ? OR f.transcript_text LIKE ? OR t.key_questions_json LIKE ? OR t.video_outline_json LIKE ?) LIMIT ?
+            """ % source_statuses, (like, like, like, like, limit))
         )
     for kind, item_id in fallback:
         if (kind, item_id) in seen:
@@ -795,6 +962,15 @@ def search(db: sqlite3.Connection, query: str, limit: int = 20) -> list[dict]:
     def literal_rank(item: dict) -> tuple[int, int, float]:
         title = str(item.get("title", "")).lower()
         body = " ".join(str(item.get(key, "")) for key in ("when_to_use", "summary_50"))
+        outline = item.get("video_outline") or {}
+        if isinstance(outline, dict):
+            body += " " + str(outline.get("overview", ""))
+            for section in outline.get("sections", []) if isinstance(outline.get("sections"), list) else []:
+                if isinstance(section, dict):
+                    body += " " + " ".join([
+                        str(section.get("title", "")), str(section.get("summary", "")),
+                        " ".join(str(point) for point in section.get("points", [])),
+                    ])
         for key in ("steps", "constraints", "common_questions", "common_symptoms", "keywords", "topic_tags"):
             values = item.get(key) or []
             body += " " + (" ".join(values) if isinstance(values, list) else str(values))
@@ -864,13 +1040,17 @@ def list_jobs(db: sqlite3.Connection, limit: int = 50) -> list[dict]:
 
 
 def next_job(db: sqlite3.Connection) -> dict | None:
-    row = db.execute("SELECT id FROM processing_jobs WHERE status='queued' ORDER BY created_at, id LIMIT 1").fetchone()
+    row = db.execute("""
+        SELECT id FROM processing_jobs
+        WHERE status='queued' AND (retry_after IS NULL OR retry_after <= ?)
+        ORDER BY COALESCE(retry_after, created_at), id LIMIT 1
+    """, (now_iso(),)).fetchone()
     if not row:
         return None
     job_id = int(row[0])
     db.execute("""
         UPDATE processing_jobs SET status='running', phase='starting', progress=1,
-            started_at=?, finished_at=NULL, error_message=NULL WHERE id=?
+            started_at=?, finished_at=NULL, retry_after=NULL, error_message=NULL WHERE id=?
     """, (now_iso(), job_id))
     db.commit()
     return get_job(db, job_id)
@@ -902,8 +1082,26 @@ def retry_job(db: sqlite3.Connection, job_id: int) -> None:
         raise ValueError(f"job not found: {job_id}")
     db.execute("""
         UPDATE processing_jobs SET status='queued', phase='queued', progress=0, message='',
-            started_at=NULL, finished_at=NULL, error_message=NULL WHERE id=?
+            started_at=NULL, finished_at=NULL, error_message=NULL, attempt_count=0,
+            retry_after=NULL WHERE id=?
     """, (job_id,))
+    db.commit()
+
+
+def schedule_model_retry(db: sqlite3.Connection, job_id: int, *, delay_seconds: int,
+                         attempt_count: int, error: str) -> None:
+    retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+    local_time = retry_at.astimezone().strftime("%H:%M")
+    db.execute("""
+        UPDATE processing_jobs
+        SET status='queued', phase='waiting_for_model', progress=0,
+            message=?, error_message=?, attempt_count=?, retry_after=?,
+            started_at=NULL, finished_at=NULL
+        WHERE id=?
+    """, (
+        f"模型服务暂时繁忙，将在 {local_time} 自动重试（第 {attempt_count} 次）",
+        error, attempt_count, retry_at.replace(microsecond=0).isoformat(), job_id,
+    ))
     db.commit()
 
 

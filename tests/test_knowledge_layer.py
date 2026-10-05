@@ -18,11 +18,12 @@ SCRIPTS = ROOT / "process-bilibili-course" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from favorite_pipeline import (  # noqa: E402
-    curate_source, import_text, likely_duplicate, make_basic_triage, review_source, transcribe_source,
+    curate_source, import_text, likely_duplicate, make_basic_triage, process_job, review_source, transcribe_source,
 )
 from knowledge_db import (  # noqa: E402
-    add_topic, add_triage, add_unit, connect, create_job, get_job, knowledge_tree,
-    link_topic_unit, link_unit_source, list_jobs, requeue_interrupted_jobs, retry_job, review_queue, search,
+    SCHEMA_VERSION, add_topic, add_triage, add_unit, connect, create_job, get_job, knowledge_tree,
+    link_topic_unit, link_unit_source, list_jobs, next_job, requeue_interrupted_jobs, retry_job, review_queue,
+    schedule_model_retry, search,
     set_status, source_detail, update_job, update_triage_questions, upsert_source,
 )
 from llm_client import (  # noqa: E402
@@ -62,11 +63,13 @@ class KnowledgeLayerTests(unittest.TestCase):
         self.triage(old)
         queues = review_queue(self.db, self.now.isoformat())
         self.assertEqual([row["id"] for row in queues["recent"]], [recent])
-        self.assertEqual([row["id"] for row in queues["historical"]], [old])
         unit_id = add_unit(self.db, {"title": "问题拆解法", "status": "approved"})
         with self.assertRaises(ValueError):
             link_unit_source(self.db, unit_id, recent)
         review_source(self.db, recent, "approve")
+        queues = review_queue(self.db, self.now.isoformat())
+        self.assertEqual([row["id"] for row in queues["approved"]], [recent])
+        self.assertEqual([row["id"] for row in queues["historical"]], [old])
         link_unit_source(self.db, unit_id, recent, segment_start=12)
         self.assertEqual(len(source_detail(self.db, recent)["units"]), 1)
 
@@ -81,6 +84,52 @@ class KnowledgeLayerTests(unittest.TestCase):
         update_job(self.db, first, status="failed", error="network")
         retry_job(self.db, first)
         self.assertEqual(list_jobs(self.db)[0]["status"], "queued")
+
+    def test_temporary_model_retry_waits_before_returning_to_the_worker(self):
+        source_id = self.source()
+        job_id = create_job(self.db, source_id, "curate")
+        schedule_model_retry(self.db, job_id, delay_seconds=120, attempt_count=1, error="503")
+        job = get_job(self.db, job_id)
+        self.assertEqual(job["status"], "queued")
+        self.assertEqual(job["phase"], "waiting_for_model")
+        self.assertEqual(job["attempt_count"], 1)
+        self.assertIsNotNone(job["retry_after"])
+        self.assertIsNone(next_job(self.db))
+
+    def test_rate_limited_triage_falls_back_to_local_source_clues(self):
+        transcript = self.root / "transcript.txt"
+        transcript.write_text("投递时记录岗位和进度。", encoding="utf-8")
+        source_id = upsert_source(self.db, {
+            "platform": "bilibili", "canonical_url": "https://www.bilibili.com/video/BV1234567890",
+            "transcript_path": str(transcript), "status": "transcribed",
+        })
+        job_id = create_job(self.db, source_id, "triage")
+        job = next_job(self.db)
+        with patch("favorite_pipeline.triage_source", side_effect=[LLMError("429 Too Many Requests"), {}]) as triage:
+            process_job(self.db_path, self.root, job, client=object())
+        self.assertEqual(triage.call_count, 2)
+        self.assertIsNone(triage.call_args_list[1].args[3])
+        self.assertEqual(get_job(self.db, job_id)["phase"], "basic_triage")
+
+    def test_rate_limit_before_transcript_never_becomes_basic_triage(self):
+        source_id = self.source()
+        job_id = create_job(self.db, source_id, "triage")
+        job = next_job(self.db)
+        with patch("favorite_pipeline.triage_source", side_effect=LLMError("429 Too Many Requests")) as triage:
+            process_job(self.db_path, self.root, job, client=object())
+        self.assertEqual(triage.call_count, 1)
+        self.assertEqual(get_job(self.db, job_id)["phase"], "waiting_for_model")
+
+    def test_transcribe_and_triage_are_separate_resumable_jobs(self):
+        source_id = self.source()
+        job_id = create_job(self.db, source_id, "transcribe")
+        job = next_job(self.db)
+        with patch("favorite_pipeline.transcribe_source") as transcribe:
+            process_job(self.db_path, self.root, job, client=object())
+        self.assertEqual(transcribe.call_count, 1)
+        self.assertEqual(get_job(self.db, job_id)["status"], "succeeded")
+        jobs = list_jobs(self.db)
+        self.assertTrue(any(row["job_type"] == "triage" and row["status"] == "queued" for row in jobs))
 
     def test_xiaohongshu_share_token_is_memory_only(self):
         captured = {}
@@ -150,7 +199,8 @@ class KnowledgeLayerTests(unittest.TestCase):
         detail = source_detail(self.db, source_id)
         self.assertEqual(detail["key_questions"][0]["question"], "群面应该如何准备？")
         self.assertIn("t=94", detail["key_questions"][0]["evidence"][0]["source_url_at"])
-        self.assertEqual(search(self.db, "群面怎么准备", 5)[0]["id"], source_id)
+        self.assertEqual(search(self.db, "群面怎么准备", 5, include_unreviewed=True)[0]["id"], source_id)
+        self.assertEqual(search(self.db, "群面怎么准备", 5), [])
         updated = update_triage_questions(self.db, source_id, [{
             "question": "群面需要抢主导吗？",
             "answer": "不需要，重点是推进讨论并完成阶段总结。",
@@ -262,6 +312,30 @@ class KnowledgeLayerTests(unittest.TestCase):
         self.assertEqual(empty_result["unit_ids"], [])
         self.assertEqual(source_detail(self.db, empty_source)["status"], "curated")
 
+    def test_approved_outline_becomes_nodes_without_a_second_model_call(self):
+        transcript = self.root / "outline.txt"
+        transcript.write_text("[00:10] 原文", encoding="utf-8")
+        source_id = upsert_source(self.db, {
+            "platform": "bilibili", "canonical_url": "https://www.bilibili.com/video/BV4444444444",
+            "transcript_path": str(transcript), "status": "approved",
+        })
+        add_triage(self.db, source_id, {
+            "video_outline": {
+                "overview": "秋招准备应按规划、简历和面试三个维度自查。",
+                "sections": [{
+                    "title": "明确岗位方向", "summary": "先确定行业和岗位，再开始投递。",
+                    "points": ["拒绝盲目海投"],
+                    "evidence": [{"time": "00:10", "excerpt": "先明确方向"}],
+                }],
+            },
+            "keywords": ["秋招"], "topic_candidates": ["求职"], "ai_mode": "ai",
+        })
+        result = curate_source(self.db, self.root, source_id)
+        self.assertEqual(len(result["unit_ids"]), 1)
+        unit = source_detail(self.db, source_id)["units"][0]
+        self.assertEqual(unit["title"], "明确岗位方向")
+        self.assertEqual(unit["segment_start"], 10.0)
+
     def test_knowledge_tree_supports_nested_topics_and_shared_units(self):
         first = add_unit(self.db, {"title": "残差诊断", "status": "approved"})
         second = add_unit(self.db, {"title": "VIF 检查", "status": "approved"})
@@ -283,10 +357,11 @@ class KnowledgeLayerTests(unittest.TestCase):
         def responder(request: httpx.Request) -> httpx.Response:
             self.assertNotIn(b"secret-key", request.content)
             content = json.dumps({
-                "questions": [
-                    {"question": "第一步应该做什么？", "answer_status": "answered", "answer": "先定义问题的边界、目标和可用信息，再开始后续执行，避免直接跳到方案。", "evidence": [{"time": "00:10", "excerpt": "定义问题"}]},
-                    {"question": "执行时怎么拆分？", "answer": "把工作拆分为具体步骤。", "evidence": [{"time": "00:40", "excerpt": "拆分步骤"}]},
-                    {"question": "最后如何确认结果？", "answer": "完成后复核最终结果。", "evidence": [{"time": "01:20", "excerpt": "复核结果"}]},
+                "overview": "视频按定义问题、拆分执行和复核结果三个阶段说明完整流程。",
+                "sections": [
+                    {"title": "定义问题", "summary": "先明确目标、边界和可用信息，再进入执行，避免直接跳到方案。", "points": ["明确目标", "确认边界"], "evidence": [{"time": "00:10", "excerpt": "定义问题"}]},
+                    {"title": "拆分执行", "summary": "把工作拆成具体步骤，逐步推进并保留复核节点。", "points": ["拆分步骤"], "evidence": [{"time": "00:40", "excerpt": "拆分步骤"}]},
+                    {"title": "复核结果", "summary": "完成后检查最终结果是否满足最初定义的目标和边界。", "points": ["复核结果"], "evidence": [{"time": "01:20", "excerpt": "复核结果"}]},
                 ],
                 "keywords": ["执行", "复核"], "topics": ["方法"],
             }, ensure_ascii=False)
@@ -298,8 +373,26 @@ class KnowledgeLayerTests(unittest.TestCase):
         self.assertLessEqual(len(data["summary_50"]), 50)
         self.assertEqual(data["ai_mode"], "ai")
         self.assertEqual(data["evidence"][0]["time"], "00:10")
-        self.assertEqual(data["key_questions"][0]["question"], "第一步应该做什么？")
-        self.assertEqual(data["key_questions"][0]["answer_status"], "answered")
+        self.assertEqual(data["key_questions"], [])
+        self.assertEqual(data["video_outline"]["sections"][0]["title"], "定义问题")
+
+    def test_video_outline_is_saved_and_searchable_without_questions(self):
+        source_id = self.source()
+        add_triage(self.db, source_id, {
+            "summary_50": "视频说明完整执行流程",
+            "video_outline": {
+                "overview": "视频按目标定义、步骤拆分和结果复核说明完整执行流程。",
+                "sections": [{
+                    "title": "拆分执行", "summary": "把任务拆成可执行步骤，并在每一步保留检查点。",
+                    "points": ["按步骤推进", "保留检查点"],
+                    "evidence": [{"time": "00:40", "excerpt": "把工作拆分为具体步骤"}],
+                }],
+            },
+        })
+        detail = source_detail(self.db, source_id)
+        self.assertEqual(detail["key_questions"], [])
+        self.assertEqual(detail["video_outline"]["sections"][0]["title"], "拆分执行")
+        self.assertEqual(search(self.db, "任务如何拆分", 5, include_unreviewed=True)[0]["id"], source_id)
 
     def test_local_ollama_uses_native_api_without_thinking(self):
         captured = {}
@@ -318,6 +411,50 @@ class KnowledgeLayerTests(unittest.TestCase):
         self.assertFalse(captured["payload"]["stream"])
         self.assertNotIn("authorization", captured["headers"])
         self.assertEqual(client.request_timeout(45), 300)
+
+    def test_transient_model_error_is_retried(self):
+        calls = 0
+
+        def responder(_request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return httpx.Response(503, json={"error": {"message": "temporarily full"}})
+            return httpx.Response(200, json={"choices": [{"message": {"content": '{"ok": true}'}}]})
+
+        client = OpenAICompatibleClient(
+            LLMSettings("https://example.test/v1", "example-model", "secret-key"),
+            httpx.MockTransport(responder),
+        )
+        with patch("llm_client.time.sleep") as sleep:
+            self.assertEqual(client.test(), {"ok": True, "model": "example-model"})
+        self.assertEqual(calls, 2)
+        self.assertEqual(sleep.call_count, 1)
+
+    def test_gemini_uses_low_reasoning_and_tries_fallback_once(self):
+        models = []
+        payloads = []
+
+        def responder(request: httpx.Request) -> httpx.Response:
+            payload = json.loads(request.content)
+            payloads.append(payload)
+            models.append(payload["model"])
+            if models[-1] == "gemini-3.8-flash":
+                return httpx.Response(503, json={"error": {"message": "temporarily full"}})
+            return httpx.Response(200, json={"choices": [{"message": {"content": '{"ok": true}'}}]})
+
+        client = OpenAICompatibleClient(
+            LLMSettings(
+                "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-3.8-flash",
+                "secret-key", "gemini-3.1-flash-lite",
+            ),
+            httpx.MockTransport(responder),
+        )
+        with patch("llm_client.time.sleep"):
+            self.assertEqual(client.test(), {"ok": True, "model": "gemini-3.1-flash-lite"})
+        self.assertEqual(models, ["gemini-3.8-flash", "gemini-3.8-flash", "gemini-3.1-flash-lite"])
+        self.assertTrue(all(payload["reasoning_effort"] == "low" for payload in payloads))
+        self.assertTrue(all(payload["response_format"] == {"type": "json_object"} for payload in payloads))
 
     def test_json_parser_accepts_a_repeated_local_model_reply(self):
         self.assertEqual(parse_json_object('{"ok": true}\n{"ok": true}'), {"ok": True})
@@ -373,7 +510,7 @@ class MigrationTests(unittest.TestCase):
             upgraded = connect(path)
             row = upgraded.execute("SELECT status, reviewed_at, review_decision FROM source_items").fetchone()
             self.assertEqual(tuple(row), ("legacy_imported", None, "legacy_migration"))
-            self.assertEqual(upgraded.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0], "4")
+            self.assertEqual(upgraded.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0], str(SCHEMA_VERSION))
             upgraded.close()
             self.assertEqual(len(list((path.parent / "backups").glob("*.db"))), 1)
 

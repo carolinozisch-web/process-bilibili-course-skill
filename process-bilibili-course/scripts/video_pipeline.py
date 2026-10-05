@@ -125,17 +125,78 @@ def load_httpx():
 def fetch_bilibili_view(url: str):
     httpx = load_httpx()
     bvid = extract_bvid(url)
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/138 Safari/537.36",
-        "Referer": f"https://www.bilibili.com/video/{bvid}",
-    }
-    client = httpx.Client(headers=headers, follow_redirects=True, timeout=120)
+    headers = bilibili_headers(bvid)
+    client = httpx.Client(headers=headers, follow_redirects=True, timeout=120, trust_env=False)
     response = client.get("https://api.bilibili.com/x/web-interface/view", params={"bvid": bvid})
+    if response.status_code == 412:
+        client.close()
+        return fetch_bilibili_page_view(url)
     response.raise_for_status()
     payload = response.json()
+    if payload.get("code") == -412:
+        client.close()
+        return fetch_bilibili_page_view(url)
     if payload.get("code") != 0:
         raise SystemExit(f"ERROR: Bilibili view API {payload.get('code')}: {payload.get('message')}")
     return client, bvid, payload["data"]
+
+
+def bilibili_headers(bvid: str) -> dict[str, str]:
+    return {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/138 Safari/537.36",
+        "Referer": f"https://www.bilibili.com/video/{bvid}",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+    }
+
+
+def json_after_marker(source: str, marker: str) -> dict:
+    start = source.find(marker)
+    if start < 0:
+        return {}
+    value = source[start + len(marker):].lstrip()
+    try:
+        parsed, _ = json.JSONDecoder().raw_decode(value)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def page_playinfo(client, bvid: str, page: int) -> dict:
+    response = client.get(f"https://www.bilibili.com/video/{bvid}", params={"p": page})
+    response.raise_for_status()
+    playinfo = json_after_marker(response.text, "window.__playinfo__=")
+    data = playinfo.get("data") if isinstance(playinfo.get("data"), dict) else {}
+    return data
+
+
+def fetch_bilibili_page_view(url: str):
+    """Fallback for Bilibili's public API 412: use the public video page state."""
+    httpx = load_httpx()
+    bvid = extract_bvid(url)
+    page = requested_page(url) or 1
+    client = httpx.Client(
+        headers=bilibili_headers(bvid), follow_redirects=True, timeout=120, trust_env=False,
+    )
+    response = client.get(f"https://www.bilibili.com/video/{bvid}", params={"p": page})
+    response.raise_for_status()
+    initial = json_after_marker(response.text, "window.__INITIAL_STATE__=")
+    data = initial.get("videoData") if isinstance(initial.get("videoData"), dict) else {}
+    if not data or not data.get("title") or not data.get("pages"):
+        client.close()
+        raise SystemExit("ERROR: Bilibili public page did not expose usable video metadata")
+    playinfo = json_after_marker(response.text, "window.__playinfo__=")
+    playback = playinfo.get("data") if isinstance(playinfo.get("data"), dict) else {}
+    data = {**data, "_page_fallback": True, "_page_playinfo": playback, "_page_number": page}
+    return client, bvid, data
+
+
+def public_audio_url(playback: dict) -> str | None:
+    options = playback.get("dash", {}).get("audio", []) if isinstance(playback, dict) else []
+    if not isinstance(options, list) or not options:
+        return None
+    selected = min((item for item in options if isinstance(item, dict)),
+                   key=lambda value: int(value.get("bandwidth") or 0), default=None)
+    return (selected or {}).get("baseUrl") or (selected or {}).get("base_url")
 
 
 def parse_duration(value) -> float:
@@ -470,22 +531,19 @@ def run_pipeline(
         print(f"EP{episode_id} DOWNLOAD {record['title']}", flush=True)
         try:
             if platform == "bilibili":
-                play = client.get(
-                    "https://api.bilibili.com/x/player/playurl",
-                    params={"bvid": source_id, "cid": int(page["cid"]), "fnval": 16, "qn": 64},
-                ).json()
-                if play.get("code") != 0:
-                    detail = str(play.get("message") or play.get("code"))
-                    update_episode(manifest, paths["manifest"], number, "access_error", detail)
-                    print(f"EP{episode_id} ACCESS_ERROR {detail}", flush=True)
-                    continue
-                options = play.get("data", {}).get("dash", {}).get("audio", [])
-                if not options:
+                if data.get("_page_fallback"):
+                    playback = data.get("_page_playinfo", {}) if number == data.get("_page_number") else page_playinfo(client, source_id, number)
+                else:
+                    play_response = client.get(
+                        "https://api.bilibili.com/x/player/playurl",
+                        params={"bvid": source_id, "cid": int(page["cid"]), "fnval": 16, "qn": 64},
+                    )
+                    playback = play_response.json().get("data", {}) if play_response.status_code == 200 else {}
+                media_url = public_audio_url(playback)
+                if not media_url:
                     update_episode(manifest, paths["manifest"], number, "access_error", "no public audio stream")
                     print(f"EP{episode_id} ACCESS_ERROR no public audio stream", flush=True)
                     continue
-                selected = min(options, key=lambda value: int(value.get("bandwidth") or 0))
-                media_url = selected.get("baseUrl") or selected.get("base_url")
             else:
                 media_url = page["media_url"]
             with client.stream("GET", media_url) as response:

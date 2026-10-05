@@ -21,13 +21,72 @@ from knowledge_db import (
     add_triage, add_unit, connect, create_job, dashboard_counts, get_job, get_source,
     index_source, link_unit_source, list_jobs, log_search, next_job, record_search_feedback,
     requeue_interrupted_jobs, retry_job, review_queue, search, set_status, source_detail,
-    update_job, upsert_source,
+    schedule_model_retry, update_job, upsert_source,
 )
 from llm_client import OpenAICompatibleClient, curate_with_ai, triage_with_ai
 
 
 Progress = Callable[[str, int, str], None]
 SourceUrlSink = Callable[[int, str], None]
+MODEL_RETRY_DELAYS = (120, 600, 1800)
+
+
+def _is_temporary_model_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(marker in message for marker in (
+        "408", "429", "500", "502", "503", "504", "service unavailable",
+        "temporarily unavailable", "timed out", "timeout", "connection error",
+    ))
+
+
+def _is_model_rate_limited(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "429" in message or "too many requests" in message or "resource_exhausted" in message
+
+
+def _seconds_from_timestamp(value: object) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        parts = [float(part) for part in str(value).split(":")]
+    except ValueError:
+        return None
+    if not parts:
+        return None
+    total = 0.0
+    for part in parts:
+        total = total * 60 + part
+    return max(0.0, total)
+
+
+def units_from_video_outline(outline: object, *, keywords: list[str] | None = None,
+                             topic_tags: list[str] | None = None) -> list[dict]:
+    """Turn the approved outline into nodes without sending the transcript again."""
+    if not isinstance(outline, dict):
+        return []
+    overview = str(outline.get("overview", "")).strip()
+    units = []
+    for section in outline.get("sections", []) if isinstance(outline.get("sections"), list) else []:
+        if not isinstance(section, dict):
+            continue
+        title = str(section.get("title", "")).strip()
+        summary = str(section.get("summary", "")).strip()
+        if not title or not summary:
+            continue
+        evidence = section.get("evidence", []) if isinstance(section.get("evidence"), list) else []
+        first_evidence = next((row for row in evidence if isinstance(row, dict)), {})
+        points = [str(point).strip() for point in section.get("points", []) if str(point).strip()]
+        units.append({
+            "title": title,
+            "method_type": "视频知识节点",
+            "when_to_use": overview,
+            "steps": [summary, *points],
+            "constraints": [], "common_questions": [], "common_symptoms": [],
+            "keywords": keywords or [], "topic_tags": topic_tags or [], "status": "approved",
+            "segment_start": _seconds_from_timestamp(first_evidence.get("time")),
+            "segment_end": None,
+        })
+    return units
 
 
 def platform_for(url: str) -> str:
@@ -321,8 +380,18 @@ def curate_source(db, workspace: Path, source_id: int,
     text = transcript_text(source, workspace)
     if not text:
         raise ValueError("curation requires a complete transcript")
-    if client is None and manual_units is None:
-        detail = source_detail(db, source_id) or {}
+    detail = source_detail(db, source_id) or {}
+    outline_units = units_from_video_outline(
+        detail.get("video_outline"), keywords=detail.get("keywords", []),
+        topic_tags=detail.get("topic_candidates", []),
+    )
+    if manual_units is None and outline_units:
+        progress = progress or (lambda *_: None)
+        progress("curate", 45, "正在根据已审核的视频结构生成知识节点")
+        units = outline_units
+    elif manual_units is None:
+        # A basic triage has no approved structure. Do not send the full
+        # transcript to a model a second time just because the source was approved.
         return {
             "manual_required": True,
             "prefill": {
@@ -333,11 +402,12 @@ def curate_source(db, workspace: Path, source_id: int,
                 "keywords": detail.get("keywords", []), "topic_tags": [],
             },
         }
-    progress = progress or (lambda *_: None)
-    progress("curate", 20, "正在提取可复用的方法")
-    units = manual_units if manual_units is not None else curate_with_ai(
-        client, timestamped_text(source, workspace) or text, source.get("title", "")
-    )
+    else:
+        progress = progress or (lambda *_: None)
+        progress("curate", 20, "正在提取可复用的方法")
+        units = manual_units if manual_units is not None else curate_with_ai(
+            client, timestamped_text(source, workspace) or text, source.get("title", "")
+        )
     unit_ids = []
     for unit in units:
         unit_id = add_unit(db, unit)
@@ -348,7 +418,7 @@ def curate_source(db, workspace: Path, source_id: int,
         unit_ids.append(unit_id)
     set_status(db, source_id, "curated", "curated")
     path = _write_curated_note(workspace, source, units)
-    progress("curate", 100, f"已生成 {len(unit_ids)} 张方法卡")
+    progress("curate", 100, f"已生成 {len(unit_ids)} 个知识节点")
     return {"source_id": source_id, "status": "curated", "unit_ids": unit_ids, "note": str(path)}
 
 
@@ -364,7 +434,14 @@ def process_job(db_path: Path, workspace: Path, job: dict,
     try:
         if job_type == "transcribe":
             transcribe_source(db, workspace, source_id, progress, source_url)
-            triage_source(db, workspace, source_id, client, progress)
+            # Audio and transcript are already durable at this point. Keep the
+            # cloud-only structure extraction in its own resumable job.
+            triage_job = create_job(db, source_id, "triage")
+            update_job(
+                db, job_id, status="succeeded", phase="transcribed", progress=100,
+                message=f"本地转写完成，已创建结构提取任务 #{triage_job}",
+            )
+            return
         elif job_type == "triage":
             triage_source(db, workspace, source_id, client, progress)
         elif job_type == "curate":
@@ -373,6 +450,31 @@ def process_job(db_path: Path, workspace: Path, job: dict,
             raise ValueError(f"unsupported job type: {job_type}")
         update_job(db, job_id, status="succeeded", phase="complete", progress=100, message="处理完成")
     except Exception as exc:
+        attempt_count = int(job.get("attempt_count") or 0) + 1
+        source = get_source(db, source_id)
+        has_transcript = bool(source and transcript_text(source, workspace))
+        if job_type == "triage" and has_transcript and _is_model_rate_limited(exc):
+            # The local transcript is already complete. Keep the source reviewable
+            # instead of treating a temporary cloud quota limit as a lost video.
+            try:
+                triage_source(db, workspace, source_id, None, progress)
+            except Exception as fallback_exc:
+                update_job(
+                    db, job_id, status="failed", phase="failed", error=str(fallback_exc),
+                    message="基础提取失败，可重试",
+                )
+                return
+            update_job(
+                db, job_id, status="succeeded", phase="basic_triage", progress=100,
+                message="模型额度受限，已生成基础原文线索，可继续人工审核",
+            )
+            return
+        if job_type in {"triage", "curate"} and _is_temporary_model_error(exc) and attempt_count <= len(MODEL_RETRY_DELAYS):
+            schedule_model_retry(
+                db, job_id, delay_seconds=MODEL_RETRY_DELAYS[attempt_count - 1],
+                attempt_count=attempt_count, error=str(exc),
+            )
+            return
         if job_type in {"transcribe", "triage"}:
             db.execute("UPDATE source_items SET status='error', error_message=? WHERE id=?", (str(exc), source_id))
             db.commit()
@@ -415,10 +517,22 @@ class JobWorker:
             job = next_job(db)
             db.close()
             if job:
-                process_job(
-                    self.db_path, self.workspace, job, self.client_getter(),
-                    self.source_url(job["source_item_id"]),
-                )
+                try:
+                    process_job(
+                        self.db_path, self.workspace, job, self.client_getter(),
+                        self.source_url(job["source_item_id"]),
+                    )
+                except Exception as exc:
+                    # A worker must never die and leave a job permanently marked
+                    # as running, even if an unexpected fallback path fails.
+                    failed_db = connect(self.db_path)
+                    try:
+                        update_job(
+                            failed_db, job["id"], status="failed", phase="failed", error=str(exc),
+                            message="处理失败，可重试",
+                        )
+                    finally:
+                        failed_db.close()
             else:
                 self.stop_event.wait(1)
 

@@ -16,13 +16,14 @@ from urllib.parse import parse_qs, urlparse
 
 from favorite_pipeline import JobWorker, curate_source, import_text, review_source, transcript_text
 from knowledge_db import (
-    basic_query_terms, connect, create_job, dashboard_counts, get_job, get_source, list_jobs, list_sources,
-    knowledge_tree, list_units, log_search, record_search_feedback, retry_job, review_queue, search,
-    source_detail, update_triage_questions, update_unit,
+    add_topic, apply_organization_plan, basic_query_terms, connect, create_job, dashboard_counts, get_job, get_source, knowledge_tree,
+    list_jobs, list_sources, list_units, log_search, record_search_feedback, retry_job, review_queue, search,
+    set_primary_topic, source_detail, source_units, update_triage_questions, update_unit,
 )
 from llm_client import (
-    LLMError, LLMSettings, OpenAICompatibleClient, answer_with_ai, expand_query,
+    LLMError, LLMSettings, OpenAICompatibleClient, answer_with_ai, expand_query, propose_organization,
 )
+from windows_credentials import CredentialStoreError, load_api_key, remove_api_key, store_api_key
 
 
 MAX_BODY_BYTES = 1024 * 1024
@@ -48,11 +49,25 @@ def _best_question(item: dict, query: str) -> dict | None:
     )
 
 
+def _best_outline_section(item: dict, query: str) -> dict | None:
+    outline = item.get("video_outline") or {}
+    sections = outline.get("sections", []) if isinstance(outline, dict) else []
+    if not sections:
+        return None
+    terms = [term.lower() for term in basic_query_terms(query)[1:]]
+    if not terms:
+        return sections[0] if isinstance(sections[0], dict) else None
+    def score(section: dict) -> int:
+        text = " ".join([
+            str(section.get("title", "")), str(section.get("summary", "")),
+            " ".join(str(point) for point in section.get("points", [])),
+        ]).lower()
+        return sum(term in text for term in terms)
+    candidates = [section for section in sections if isinstance(section, dict)]
+    return max(candidates, key=score, default=None)
+
+
 def answer_from_cards(results: list[dict], query: str = "") -> str:
-    if results:
-        question = _best_question(results[0], query)
-        if question:
-            return f"{question['question']}\n\n{question['answer']}"
     cards = [result for result in results if result.get("kind") == "knowledge_unit"]
     if cards:
         card = cards[0]
@@ -66,7 +81,31 @@ def answer_from_cards(results: list[dict], query: str = "") -> str:
             lines.extend(["", "注意："])
             lines.extend(f"- {constraint}" for constraint in card["constraints"])
         return "\n".join(lines)
+    sources = [result for result in results if result.get("kind") == "source"]
+    for source in sources:
+        outline = source.get("video_outline") or {}
+        section = _best_outline_section(source, query)
+        if section:
+            lines = [str(outline.get("overview", "")).strip(), "", section.get("title", "")]
+            lines.append(section.get("summary", ""))
+            lines.extend(f"- {point}" for point in section.get("points", []))
+            return "\n".join(line for line in lines if line is not None).strip()
+    if results:
+        question = _best_question(results[0], query)
+        if question:
+            return f"{question['question']}\n\n{question['answer']}"
     return "没有直接答案"
+
+
+def flatten_topic_tree(topics: list[dict], path: list[str] | None = None) -> list[dict]:
+    path = path or []
+    rows = []
+    for topic in topics:
+        current = [*path, str(topic.get("title", ""))]
+        if topic.get("id") not in (None, 0):
+            rows.append({"id": topic["id"], "path": " › ".join(current)})
+        rows.extend(flatten_topic_tree(topic.get("children", []), current))
+    return rows
 
 
 class AppState:
@@ -74,10 +113,11 @@ class AppState:
         self.workspace = workspace.resolve()
         self.db_path = self.workspace / "知识库" / "knowledge.db"
         self.local_model_path = self.workspace / "知识库" / "local_model.json"
+        self.cloud_model_path = self.workspace / "知识库" / "cloud_model.json"
         self.assets = Path(__file__).resolve().parents[1] / "assets" / "web"
         self.settings = LLMSettings.from_environment()
         if not self.settings.configured:
-            self.settings = self._load_local_model_settings() or self.settings
+            self.settings = self._load_cloud_model_settings() or self._load_local_model_settings() or self.settings
         self.settings_lock = threading.Lock()
         db = connect(self.db_path)
         db.close()
@@ -100,21 +140,63 @@ class AppState:
             "model": self.settings.model,
         }, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    def _load_cloud_model_settings(self) -> LLMSettings | None:
+        try:
+            saved = json.loads(self.cloud_model_path.read_text(encoding="utf-8"))
+            api_key = load_api_key()
+            settings = LLMSettings(
+                str(saved.get("base_url", "")), str(saved.get("model", "")), api_key,
+                str(saved.get("fallback_model", "")),
+            )
+            return settings if settings.configured else None
+        except (OSError, json.JSONDecodeError, AttributeError, CredentialStoreError):
+            return None
+
+    def _save_cloud_model_settings(self) -> None:
+        if self.settings.is_local_ollama or not self.settings.configured:
+            raise ValueError("请先填写云端模型的服务地址、模型名和 API Key")
+        store_api_key(self.settings.api_key)
+        self.cloud_model_path.parent.mkdir(parents=True, exist_ok=True)
+        self.cloud_model_path.write_text(json.dumps({
+            "base_url": self.settings.base_url,
+            "model": self.settings.model,
+            "fallback_model": self.settings.fallback_model,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _clear_cloud_model_settings(self) -> None:
+        remove_api_key()
+        self.cloud_model_path.unlink(missing_ok=True)
+
+    def public_settings(self) -> dict:
+        with self.settings_lock:
+            result = self.settings.public()
+        result["key_saved_on_device"] = self.cloud_model_path.exists()
+        return result
+
     def client(self) -> OpenAICompatibleClient | None:
         with self.settings_lock:
-            settings = LLMSettings(self.settings.base_url, self.settings.model, self.settings.api_key)
+            settings = LLMSettings(
+                self.settings.base_url, self.settings.model, self.settings.api_key,
+                self.settings.fallback_model,
+            )
         return OpenAICompatibleClient(settings) if settings.configured else None
 
     def update_settings(self, values: dict) -> dict:
         with self.settings_lock:
             self.settings.base_url = str(values.get("base_url", self.settings.base_url)).strip()
             self.settings.model = str(values.get("model", self.settings.model)).strip()
+            self.settings.fallback_model = str(values.get("fallback_model", self.settings.fallback_model)).strip()
             if values.get("api_key"):
                 self.settings.api_key = str(values["api_key"]).strip()
             if values.get("clear_api_key"):
                 self.settings.api_key = ""
+                self._clear_cloud_model_settings()
             self._save_local_model_settings()
-            return self.settings.public()
+        return self.public_settings()
+
+    def remember_cloud_settings(self) -> None:
+        with self.settings_lock:
+            self._save_cloud_model_settings()
 
 
 class AppServer(ThreadingHTTPServer):
@@ -223,7 +305,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(dashboard_counts(db))
             elif path == "/api/items":
                 queue_name = query.get("queue", [""])[0]
-                if queue_name in {"recent", "historical"}:
+                if queue_name in {"recent", "historical", "approved"}:
                     self._json(review_queue(db).get(queue_name, []))
                 elif queue_name == "review":
                     self._json(review_queue(db))
@@ -246,18 +328,22 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(list_units(db))
             elif path == "/api/knowledge-tree":
                 self._json(knowledge_tree(db))
+            elif path == "/api/organization-sources":
+                sources = []
+                for source in list_sources(db, limit=300):
+                    units = source_units(db, source["id"])
+                    if source.get("status") in {"approved", "curated"} and units:
+                        sources.append({"id": source["id"], "title": source.get("title") or source["canonical_url"],
+                                        "unit_count": len(units)})
+                self._json(sources)
             elif path == "/api/search":
                 query_text = query.get("q", [""])[0].strip()
                 if not query_text:
                     raise ValueError("请输入搜索问题")
-                client = state.client()
+                use_ai = query.get("ai", [""])[0] == "1"
+                client = state.client() if use_ai else None
                 terms = [query_text]
                 ai_error = None
-                if client:
-                    try:
-                        terms.extend(expand_query(client, query_text))
-                    except LLMError as exc:
-                        ai_error = str(exc)
                 merged, seen = [], set()
                 for term in terms:
                     for result in search(db, term, 12):
@@ -277,9 +363,10 @@ class Handler(BaseHTTPRequestHandler):
                         ai_error = str(exc)
                 event_id = log_search(db, query_text, [row["id"] for row in merged if row["kind"] == "knowledge_unit"])
                 self._json({"event_id": event_id, "answer": answer, "results": merged,
-                            "mode": "ai" if client and not ai_error else "literal", "ai_error": ai_error})
+                            "mode": "ai" if client and not ai_error else "literal", "ai_error": ai_error,
+                            "ai_available": bool(state.client())})
             elif path == "/api/settings/llm":
-                self._json(state.settings.public())
+                self._json(state.public_settings())
             else:
                 self._error(404, "not found")
         finally:
@@ -316,11 +403,42 @@ class Handler(BaseHTTPRequestHandler):
                     if not isinstance(units, list):
                         raise ValueError("units 必须是数组")
                     self._json(curate_source(db, state.workspace, source_id, manual_units=units))
-                elif state.client():
-                    self._json({"job_id": create_job(db, source_id, "curate")}, HTTPStatus.ACCEPTED)
                 else:
                     result = curate_source(db, state.workspace, source_id)
-                    self._json(result, HTTPStatus.CONFLICT)
+                    self._json(result, HTTPStatus.CONFLICT if result.get("manual_required") else HTTPStatus.OK)
+            elif method == "POST" and (match := re.fullmatch(r"/api/items/(\d+)/organization-proposal", path)):
+                source_id = int(match.group(1))
+                source = source_detail(db, source_id)
+                if not source:
+                    raise ValueError("没有找到这条收藏")
+                units = source_units(db, source_id)
+                if source.get("status") not in {"approved", "curated"}:
+                    raise ValueError("请先批准并生成知识点，再请求归档建议")
+                if not units:
+                    raise ValueError("这条内容还没有知识点，无法生成归档建议")
+                plan, mode = propose_organization(
+                    state.client(), source, units, flatten_topic_tree(knowledge_tree(db)),
+                )
+                self._json({"plan": plan, "mode": mode, "source": {"id": source_id, "title": source.get("title", "")}})
+            elif method == "POST" and (match := re.fullmatch(r"/api/items/(\d+)/organization", path)):
+                source_id = int(match.group(1))
+                plan = body.get("plan")
+                if not isinstance(plan, dict):
+                    raise ValueError("缺少归档方案")
+                self._json(apply_organization_plan(db, source_id, plan))
+            elif method == "POST" and path == "/api/topics":
+                parent_id = body.get("parent_id")
+                topic_id = add_topic(
+                    db, str(body.get("title", "")),
+                    description=str(body.get("description", "")),
+                    topic_type=str(body.get("topic_type", "")),
+                    parent_id=int(parent_id) if parent_id not in (None, "", 0, "0") else None,
+                )
+                self._json({"id": topic_id}, HTTPStatus.CREATED)
+            elif method == "PUT" and (match := re.fullmatch(r"/api/units/(\d+)/topic", path)):
+                topic_id = int(body.get("topic_id"))
+                set_primary_topic(db, topic_id, int(match.group(1)))
+                self._json({"ok": True, "topic_id": topic_id})
             elif method == "POST" and (match := re.fullmatch(r"/api/jobs/(\d+)/retry", path)):
                 retry_job(db, int(match.group(1)))
                 self._json({"ok": True})
@@ -337,7 +455,10 @@ class Handler(BaseHTTPRequestHandler):
                 client = state.client()
                 if not client:
                     raise ValueError("请完整填写服务地址、模型名和 API Key")
-                self._json(client.test())
+                result = client.test()
+                if body.get("remember_api_key"):
+                    state.remember_cloud_settings()
+                self._json(result)
             else:
                 self._error(404, "not found")
         finally:
@@ -361,12 +482,16 @@ def make_server(workspace: Path, port: int = 8765) -> AppServer:
     return AppServer(("127.0.0.1", selected), Handler, state)
 
 
-def serve(workspace: Path, port: int = 8765, open_browser: bool = True) -> None:
+def serve(workspace: Path, port: int = 8765, open_browser: bool = True,
+          url_file: Path | None = None) -> None:
     server = make_server(workspace, port)
     server.state.worker.start()
     url = f"http://127.0.0.1:{server.server_address[1]}"
-    print(f"今天你收了吗：{url}")
+    print(f"ClearVault: {url}")
     print(f"工作目录：{server.state.workspace}")
+    if url_file:
+        url_file.parent.mkdir(parents=True, exist_ok=True)
+        url_file.write_text(url, encoding="utf-8")
     if open_browser:
         threading.Timer(0.7, lambda: webbrowser.open(url)).start()
     try:
@@ -383,8 +508,10 @@ def main() -> None:
     parser.add_argument("--workspace", default=".")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--no-open", action="store_true")
+    parser.add_argument("--url-file", help="write the selected local URL after startup")
     args = parser.parse_args()
-    serve(Path(args.workspace), args.port, not args.no_open)
+    serve(Path(args.workspace), args.port, not args.no_open,
+          Path(args.url_file) if args.url_file else None)
 
 
 if __name__ == "__main__":
