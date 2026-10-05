@@ -24,6 +24,7 @@ from knowledge_db import (
     schedule_model_retry, update_job, upsert_source,
 )
 from llm_client import OpenAICompatibleClient, curate_with_ai, triage_with_ai
+from transcript_evidence import timestamp_seconds, validate_outline_times, validate_time
 
 
 Progress = Callable[[str, int, str], None]
@@ -45,25 +46,15 @@ def _is_model_rate_limited(exc: Exception) -> bool:
 
 
 def _seconds_from_timestamp(value: object) -> float | None:
-    if value in (None, ""):
-        return None
-    try:
-        parts = [float(part) for part in str(value).split(":")]
-    except ValueError:
-        return None
-    if not parts:
-        return None
-    total = 0.0
-    for part in parts:
-        total = total * 60 + part
-    return max(0.0, total)
+    return timestamp_seconds(value)
 
 
 def units_from_video_outline(outline: object, *, keywords: list[str] | None = None,
-                             topic_tags: list[str] | None = None) -> list[dict]:
+                             topic_tags: list[str] | None = None, duration: object = None) -> list[dict]:
     """Turn the approved outline into nodes without sending the transcript again."""
     if not isinstance(outline, dict):
         return []
+    validate_outline_times(outline, duration)
     overview = str(outline.get("overview", "")).strip()
     units = []
     for section in outline.get("sections", []) if isinstance(outline.get("sections"), list) else []:
@@ -321,7 +312,8 @@ def triage_source(db, workspace: Path, source_id: int,
         raise ValueError("生成速览前需要完整逐字稿")
     progress = progress or (lambda *_: None)
     progress("triage", 75, "正在阅读完整逐字稿并生成三点速览")
-    data = triage_with_ai(client, timestamped_text(source, workspace) or text, source.get("title", "")) \
+    data = triage_with_ai(client, timestamped_text(source, workspace) or text, source.get("title", ""),
+                          duration=source.get("duration_seconds")) \
         if client else make_basic_triage(text, timestamped_text(source, workspace), source.get("title", ""))
     related = [row for row in search(db, source.get("title", ""), 12)
                if row.get("kind") == "source" and row.get("id") != source_id
@@ -383,7 +375,7 @@ def curate_source(db, workspace: Path, source_id: int,
     detail = source_detail(db, source_id) or {}
     outline_units = units_from_video_outline(
         detail.get("video_outline"), keywords=detail.get("keywords", []),
-        topic_tags=detail.get("topic_candidates", []),
+        topic_tags=detail.get("topic_candidates", []), duration=source.get("duration_seconds"),
     )
     if manual_units is None and outline_units:
         progress = progress or (lambda *_: None)
@@ -408,6 +400,11 @@ def curate_source(db, workspace: Path, source_id: int,
         units = manual_units if manual_units is not None else curate_with_ai(
             client, timestamped_text(source, workspace) or text, source.get("title", "")
         )
+    for unit in units:
+        start = validate_time(unit.get("segment_start"), source.get("duration_seconds"))
+        end = validate_time(unit.get("segment_end"), source.get("duration_seconds"))
+        if start is not None and end is not None and end < start:
+            raise ValueError("知识节点结束时间不能早于起点")
     unit_ids = []
     for unit in units:
         unit_id = add_unit(db, unit)

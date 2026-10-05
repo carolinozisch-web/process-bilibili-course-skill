@@ -213,7 +213,7 @@ python process-bilibili-course/scripts/video_pipeline.py run `
 - 不自动读取私人收藏夹，不提取浏览器 Cookie，也不执行平台侧删除。
 - 当前是本地单用户产品，没有账号、云同步和多设备协作。
 - 转写与 AI 提炼是分开的任务；暂时性模型错误可以延迟重试，不必重新下载已完成的文件。部分限额错误可退回基础原文线索，归档建议也有本地基础方案；并非所有模型错误都会自动成功恢复。
-- 已保存样本中发现证据时间越界：约 10 分钟的视频出现了小时级时间标记。该问题及历史记录修复仍待完成，不能把格式检查当作证据正确性的保证。
+- 已加入逐字稿片段编号绑定与视频时长校验，避免模型把分钟误写为小时后直接入库。历史越界证据仅在原文可以唯一匹配时修复；不能把时间有效或格式正确当作内容语义正确的保证，也不保证第三方播放器按时间跳转。
 - 当前自动测试覆盖工作流与部分失败情况，不代表已完成所有真实链接端到端验收、外部用户研究或准确率评估。
 
 如果这个项目对你有帮助，欢迎点一个 Star，也欢迎提交 Issue 或 Pull Request 改进跨平台支持、质量检查和笔记标准。
@@ -246,7 +246,17 @@ ClearVault (formerly 今天你收了吗) turns public Bilibili or Xiaohongshu vi
 - Checkpoints after every episode and resumes interrupted runs.
 - Validates expected files, manifest states, temporary media cleanup, and Markdown links.
 
-Known limitation: saved AI evidence timestamps can exceed the source duration. Timestamp validation and historical repair are pending. Automated tests are not an overall accuracy benchmark or proof of user benefits. Cloud enhancement sends relevant text to the configured provider.
+Evidence is now bound to transcript segment IDs, with duration checks before saving. Historical out-of-range times can be repaired only when uniquely grounded in the transcript; back up first. Valid timestamps do not prove semantic accuracy or guarantee seeking in a third-party player. Automated tests are not an overall accuracy benchmark or proof of user benefits. Cloud enhancement sends relevant text to the configured provider.
+
+### Repair historical evidence times
+
+Preview without modifying the database:
+
+```powershell
+python process-bilibili-course/scripts/repair_evidence_times.py --workspace 'D:\Video Summary'
+```
+
+Add `--apply` to create a SQLite backup and apply uniquely grounded repairs. Review decisions, topic placement, and node IDs are preserved. Ambiguous evidence is reported instead of guessed; no model API is used.
 
 ### Quick start
 

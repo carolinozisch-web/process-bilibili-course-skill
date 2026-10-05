@@ -15,7 +15,8 @@ Only `approved` or `curated` sources may be linked to knowledge cards. AI may su
 - AI mode chunks long transcripts, extracts sections with evidence per chunk, and reduces the candidates.
 - Approved outlines can become knowledge nodes without sending the complete transcript again. Without a usable outline, keep the manual editing path.
 - A reviewed source may produce zero or more nodes. Zero is valid when there is no reusable knowledge.
-- Source timestamps are retained for verification, but saved records have shown out-of-range model times. Duration and transcript-grounding validation, plus historical repair, remain pending; do not claim that a nonempty evidence field proves correctness.
+- Model evidence references stable transcript segment IDs; the program supplies the timestamp and verbatim source text. Unknown IDs or ungrounded legacy excerpts are rejected. Chunk-level and reduction-stage references are checked against the available evidence.
+- Storage and curation validate timestamp syntax, source duration, and range order. Historical out-of-range outline times can be repaired with `scripts/repair_evidence_times.py`: dry-run by default, SQLite backup before applying, and unique verbatim matches only. No automatic hours/minutes division is allowed. A valid time still does not prove semantic correctness.
 
 ## Jobs
 

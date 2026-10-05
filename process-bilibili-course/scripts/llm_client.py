@@ -15,6 +15,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from transcript_evidence import EvidenceError, bind_outline, evidence_fields, transcript_segments
+
 
 RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 # A job has its own delayed retry schedule. Keep the immediate retry small so a
@@ -249,8 +251,16 @@ def compact_summary(points: list[Any]) -> tuple[str, list[str]]:
     return summary[:50], clean
 
 
-def triage_with_ai(client: OpenAICompatibleClient, transcript: str, title: str = "") -> dict:
-    chunks = chunk_text(transcript)
+def triage_with_ai(client: OpenAICompatibleClient, transcript: str, title: str = "",
+                   *, duration: object = None) -> dict:
+    try:
+        segments = transcript_segments(transcript, duration)
+    except EvidenceError as exc:
+        raise LLMError(str(exc)) from exc
+    if not segments:
+        raise LLMError("缺少带时间逐字稿，无法生成可定位的原文证据")
+    numbered = "\n".join(f"[{row['segment_id']}] {row['excerpt']}" for row in segments)
+    chunks = chunk_text(numbered)
     candidates: list[dict] = []
     system = "你负责还原视频的论述结构。只输出合法 JSON；每个判断只能使用逐字稿明确表达的信息。"
     for index, chunk in enumerate(chunks, 1):
@@ -260,19 +270,28 @@ def triage_with_ai(client: OpenAICompatibleClient, transcript: str, title: str =
 - title：不超过 20 字的章节标题
 - summary：60 到 110 字的完整说明，先写结论，再说明它如何承接视频主题
 - points：0 到 3 条支撑这一结论的短要点
-- evidence：1 到 3 条原文证据，每条有 time 和 excerpt
+- evidence：1 到 3 条原文证据，每条只需 segment_id，例如 S000001。只能选本段给出的编号；不要生成或改写时间戳，程序会从原逐字稿填入时间和原文。
 只保留能组成完整观点的章节。忽略开场宣传、关注引导和结尾预告。不得写原文没有的概念或事实。
 
 逐字稿：
 {chunk}
 """)
-        candidates.extend(result.get("sections", []))
+        allowed_ids = set(re.findall(r"\[(S\d{6})\]", chunk))
+        try:
+            bound = bind_outline(result, [row for row in segments if row['segment_id'] in allowed_ids])
+        except EvidenceError as exc:
+            raise LLMError(str(exc)) from exc
+        candidates.extend(bound.get("sections", []))
     if len(chunks) > 1:
         reduced = client.complete_json(system, f"""
-把以下分段候选合成为整条视频的逻辑提纲。输出 JSON：overview 是 80 到 140 字的总判断；sections 是按原视频顺序排列的 2 到 5 个章节，每个章节保留 title、summary、points、evidence。整体要让读者不看原视频也能理解：视频的中心观点、展开顺序和最后结论。不得把章节写成问题，也不得补充候选证据中没有的事实。
+把以下分段候选合成为整条视频的逻辑提纲。输出 JSON：overview 是 80 到 140 字的总判断；sections 是按原视频顺序排列的 2 到 5 个章节，每个章节保留 title、summary、points、evidence。evidence 只能引用候选中已有的 segment_id，不要输出时间。整体要让读者不看原视频也能理解：视频的中心观点、展开顺序和最后结论。不得把章节写成问题，也不得补充候选证据中没有的事实。
 候选章节：{json.dumps(candidates, ensure_ascii=False)}
 """)
-        outline_raw = reduced
+        allowed_ids = {row['segment_id'] for section in candidates for row in section['evidence']}
+        try:
+            outline_raw = bind_outline(reduced, [row for row in segments if row['segment_id'] in allowed_ids])
+        except EvidenceError as exc:
+            raise LLMError(str(exc)) from exc
         keywords = reduced.get("keywords", [])
         topics = reduced.get("topics", [])
     else:
@@ -327,7 +346,7 @@ def _normalize_video_outline(value: object) -> dict:
             time = str(row.get("time", "")).strip()[:20]
             excerpt = re.sub(r"\s+", " ", str(row.get("excerpt", "")).strip())[:220]
             if time and excerpt:
-                evidence.append({"time": time, "excerpt": excerpt})
+                evidence.append({"time": time, "excerpt": excerpt, **evidence_fields(row)})
         template_text = " ".join([title, summary, *points] + [
             f"{row['time']} {row['excerpt']}" for row in evidence
         ])

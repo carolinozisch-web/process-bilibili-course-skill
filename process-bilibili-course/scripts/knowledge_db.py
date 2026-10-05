@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Iterable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from transcript_evidence import evidence_fields, timestamp_seconds, validate_outline_times, validate_time
+
 
 SCHEMA_VERSION = 7
 SOURCE_STATUSES = {
@@ -371,12 +373,17 @@ def dashboard_counts(db: sqlite3.Connection) -> dict:
 
 
 def add_triage(db: sqlite3.Connection, source_id: int, data: dict) -> None:
+    source = get_source(db, source_id)
+    if not source:
+        raise ValueError(f"source not found: {source_id}")
+    duration = source.get("duration_seconds")
     summary = str(data.get("summary_50", "")).strip()
     if len(summary) > 50:
         raise ValueError("summary_50 must be at most 50 characters")
     questions = _normalize_questions(data.get("key_questions", []))
     outline = _normalize_outline(data.get("video_outline", {}))
     if outline:
+        validate_outline_times(outline, duration)
         summary = outline["overview"][:50] or summary
         points = [section["title"] for section in outline["sections"]]
         while len(points) < 3:
@@ -391,6 +398,9 @@ def add_triage(db: sqlite3.Connection, source_id: int, data: dict) -> None:
     else:
         points = [data.get("point_1", ""), data.get("point_2", ""), data.get("point_3", "")]
         evidence = data.get("evidence", [])
+    for row in evidence:
+        validate_time(row.get("time"), duration)
+    validate_time(data.get("usable_content_start"), duration)
     db.execute("""
         INSERT INTO triage(source_item_id, summary_50, point_1, point_2, point_3, keywords,
             topic_candidates, source_signals, possible_duplicates, new_points, usable_content_start,
@@ -440,7 +450,7 @@ def _normalize_questions(value: object) -> list[dict]:
             time = str(row.get("time", "")).strip()[:20]
             excerpt = re.sub(r"\s+", " ", str(row.get("excerpt", "")).strip())[:220]
             if time or excerpt:
-                evidence.append({"time": time, "excerpt": excerpt})
+                evidence.append({"time": time, "excerpt": excerpt, **evidence_fields(row)})
         if status == "answered" and (not answer or not evidence):
             status = "partial" if answer else "question_only"
             status_note = status_note or ("答案缺少可验证的原文依据" if answer else "原文只提出了问题")
@@ -478,7 +488,7 @@ def _normalize_outline(value: object) -> dict:
             time = str(row.get("time", "")).strip()[:20]
             excerpt = re.sub(r"\s+", " ", str(row.get("excerpt", "")).strip())[:220]
             if time or excerpt:
-                evidence.append({"time": time, "excerpt": excerpt})
+                evidence.append({"time": time, "excerpt": excerpt, **evidence_fields(row)})
         if title and summary and evidence:
             sections.append({"title": title, "summary": summary, "points": points, "evidence": evidence[:3]})
     return {"overview": overview, "sections": sections} if overview and sections else {}
@@ -527,6 +537,9 @@ def update_triage_questions(db: sqlite3.Connection, source_id: int, questions: o
     if not db.execute("SELECT 1 FROM triage WHERE source_item_id=?", (source_id,)).fetchone():
         raise ValueError("这条收藏尚未生成审核内容")
     summary, points, evidence = _legacy_triage_fields(normalized)
+    source = get_source(db, source_id) or {}
+    for row in evidence:
+        validate_time(row.get("time"), source.get("duration_seconds"))
     db.execute("""
         UPDATE triage SET summary_50=?, point_1=?, point_2=?, point_3=?, evidence_json=?,
             key_questions_json=?, usable_content_start=?, created_at=? WHERE source_item_id=?
@@ -616,11 +629,15 @@ def update_unit(db: sqlite3.Connection, unit_id: int, unit: dict) -> dict:
 
 
 def link_unit_source(db: sqlite3.Connection, unit_id: int, source_id: int, **fields: object) -> None:
-    source = db.execute("SELECT status FROM source_items WHERE id=?", (source_id,)).fetchone()
+    source = db.execute("SELECT status, duration_seconds FROM source_items WHERE id=?", (source_id,)).fetchone()
     if not source:
         raise ValueError(f"source not found: {source_id}")
     if source[0] not in {"approved", "curated"}:
         raise ValueError("knowledge units require explicit source approval")
+    start = validate_time(fields.get("segment_start"), source[1])
+    end = validate_time(fields.get("segment_end"), source[1])
+    if start is not None and end is not None and end < start:
+        raise ValueError("knowledge range ends before it starts")
     db.execute("""
         INSERT INTO unit_sources(knowledge_unit_id, source_item_id, segment_start, segment_end,
             contribution_type, new_points) VALUES(?,?,?,?,?,?)
@@ -628,26 +645,15 @@ def link_unit_source(db: sqlite3.Connection, unit_id: int, source_id: int, **fie
             segment_start=excluded.segment_start, segment_end=excluded.segment_end,
             contribution_type=excluded.contribution_type, new_points=excluded.new_points
     """, (
-        unit_id, source_id, fields.get("segment_start"), fields.get("segment_end"),
+        unit_id, source_id, start, end,
         fields.get("contribution_type", "primary"), as_json(fields.get("new_points", [])),
     ))
     db.commit()
 
 
 def _seconds(value: object) -> int | None:
-    if value in (None, ""):
-        return None
-    try:
-        return max(0, int(float(value)))
-    except (TypeError, ValueError):
-        parts = str(value).split(":")
-        try:
-            total = 0.0
-            for part in parts:
-                total = total * 60 + float(part)
-            return max(0, int(total))
-        except ValueError:
-            return None
+    seconds = timestamp_seconds(value)
+    return int(seconds) if seconds is not None else None
 
 
 def _source_url_at(url: str, start: object = None) -> str:
